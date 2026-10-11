@@ -150,14 +150,21 @@ const CATEGORY_CODE = {
   WATER: 'WATER_BILL', INSURANCE: 'INSURANCE_PREMIUM', WASTE: 'WASTE_BILL', SCHOOL: 'SCHOOL_FEES',
 };
 
+// Live biller codes, from Flutterwave's documentation. The live billers list has no category field,
+// so we keep a fixed list here. Add a code only after you confirm it from the dashboard or a real call.
+const LIVE_BILLERS = {
+  CABLE: [
+    { code: 'BIL119', name: 'DStv' }, { code: 'BIL120', name: 'GOtv' },
+    { code: 'BIL128', name: 'MyTV' }, { code: 'BIL129', name: 'HiTV' },
+  ],
+};
+
 export async function listBillers(category) {
   if (!live()) {
     if (!sandbox()) throw new Error('Flutterwave key is missing');
     return SANDBOX_BILLERS[category] || [];
   }
-  const r = await call(`/billers?country=NG&category=${CATEGORY_CODE[category]}`);
-  if (!r.ok) throw new Error(r.msg || 'Could not load providers');
-  return (r.data || []).map((b) => ({ code: b.biller_code, name: b.name }));
+  return LIVE_BILLERS[category] || [];
 }
 
 // Items are plans (data bundles, cable packages) or meter types for electricity.
@@ -186,7 +193,7 @@ export async function validateBillCustomer({ billerCode, itemCode, customer }) {
     if (!sandbox()) throw new Error('Flutterwave key is missing');
     return { name: 'Test Customer' };
   }
-  const r = await call(`/billers/${encodeURIComponent(billerCode)}/items/${encodeURIComponent(itemCode)}/validate?customer=${encodeURIComponent(customer)}`);
+  const r = await call(`/bill-items/${encodeURIComponent(itemCode)}/validate?customer=${encodeURIComponent(customer)}`);
   if (!r.ok) throw new Error(r.msg || 'Could not check this number');
   return { name: r.data?.name || r.data?.customer_name || 'Customer found' };
 }
@@ -198,9 +205,8 @@ export async function payBillItem({ reference, category, billerCode, itemCode, c
     console.log(`[sandbox bill] ${reference} ${category} ${billerCode}/${itemCode} ${amountKobo} to ${customer}`);
     return { status: 'success' };
   }
-  const r = await call('/bills', 'POST', {
-    country: 'NG', customer, amount: amountKobo / 100, recurrence: 'ONCE',
-    type: itemCode, biller_code: billerCode, reference,
+  const r = await call(`/billers/${encodeURIComponent(billerCode)}/items/${encodeURIComponent(itemCode)}/payment`, 'POST', {
+    country: 'NG', customer_id: customer, amount: amountKobo / 100, reference,
   });
   if (r.http >= 500 || !r.data && !r.ok) return { status: 'pending', msg: r.msg };
   if (!r.ok) return { status: 'failed', msg: r.msg };
