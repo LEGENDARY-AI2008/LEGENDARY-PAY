@@ -124,3 +124,9 @@ INSERT INTO settings(key, value) VALUES
   ('daily_limit_verified', 50000000),   -- N500,000 per day
   ('daily_limit_unverified', 500000)    -- N5,000 per day (wallet-to-wallet only)
 ON CONFLICT DO NOTHING;
+
+-- email verification at signup (6-digit code, 15 minutes, 5 tries)
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified boolean NOT NULL DEFAULT false;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS verify_hash text;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS verify_expires timestamptz;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS verify_tries int NOT NULL DEFAULT 0;

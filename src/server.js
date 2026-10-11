@@ -37,6 +37,16 @@ const httpErr = (status, msg) => Object.assign(new Error(msg), { status });
 const h = (fn) => (req, res, next) => fn(req, res).catch(next);
 const safeEq = (a, b) => { const x = Buffer.from(String(a)), y = Buffer.from(String(b)); return x.length === y.length && crypto.timingSafeEqual(x, y); };
 const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
+// Emails a fresh 6-digit code and stores only its hash (15 minutes, 5 tries).
+async function sendVerifyCode(uid, email) {
+  const code = String(crypto.randomInt(100000, 1000000));
+  await q(`UPDATE users SET verify_hash=$2, verify_expires=now() + interval '15 minutes', verify_tries=0 WHERE id=$1`, [uid, sha(code)]);
+  await sendMail(email, 'Your verification code', `Your Legendary Pay code is ${code}. It expires in 15 minutes. If you did not sign up, ignore this email.`);
+}
+async function requireEmailVerified(uid) {
+  const ok = (await q('SELECT email_verified FROM users WHERE id=$1', [uid])).rows[0]?.email_verified === true;
+  if (!ok) throw httpErr(403, 'Verify your email first');
+}
 const naira = (k) => '₦' + (k / 100).toLocaleString('en-NG');
 const sign = (id) => jwt.sign({ uid: id }, process.env.JWT_SECRET, { expiresIn: '7d' });
 const validAmount = (n) => Number.isInteger(n) && n >= 1000 && n <= 50_000_000; // N10 .. N500,000 (kobo)
@@ -97,12 +107,37 @@ app.post('/auth/signup', h(async (req, res) => {
         [`u:${u.id}:main`, u.id, `u:${u.id}:bonus`]);
       return u;
     });
-    sendMail(email, 'Welcome', 'Your wallet is ready. Verify your identity in the app to get your funding account.').catch(() => {});
+    sendVerifyCode(user.id, email).catch((e) => console.error('verify mail failed', e));
     res.status(201).json({ token: sign(user.id), accountNumber: user.account_number, referralCode: user.referral_code });
   } catch (e) {
     if (e.code === '23505') throw httpErr(409, 'Phone number or email already registered');
     throw e;
   }
+}));
+
+app.post('/auth/verify-email', auth, h(async (req, res) => {
+  const code = String(req.body?.code || '').trim();
+  if (!/^\d{6}$/.test(code)) throw httpErr(400, 'Enter the 6-digit code');
+  const u = (await q('SELECT email_verified, verify_hash, verify_expires, verify_tries FROM users WHERE id=$1', [req.uid])).rows[0];
+  if (!u) throw httpErr(401, 'Unauthorized');
+  if (u.email_verified) return res.json({ ok: true });
+  if (!u.verify_hash || !u.verify_expires || u.verify_expires < new Date() || u.verify_tries >= 5) {
+    throw httpErr(400, 'Code expired. Ask for a new one.');
+  }
+  if (!safeEq(sha(code), u.verify_hash)) {
+    await q('UPDATE users SET verify_tries=verify_tries+1 WHERE id=$1', [req.uid]);
+    throw httpErr(400, 'Wrong code');
+  }
+  await q('UPDATE users SET email_verified=true, verify_hash=NULL, verify_expires=NULL, verify_tries=0 WHERE id=$1', [req.uid]);
+  res.json({ ok: true });
+}));
+
+app.post('/auth/resend-verify', auth, h(async (req, res) => {
+  const u = (await q('SELECT email, email_verified FROM users WHERE id=$1', [req.uid])).rows[0];
+  if (!u) throw httpErr(401, 'Unauthorized');
+  if (u.email_verified) return res.json({ ok: true });
+  await sendVerifyCode(req.uid, u.email);
+  res.json({ ok: true });
 }));
 
 app.post('/auth/login', h(async (req, res) => {
@@ -145,6 +180,7 @@ app.post('/auth/reset', h(async (req, res) => {
 
 // ---------- identity check + funding account ----------
 app.post('/kyc/verify', auth, h(async (req, res) => {
+  await requireEmailVerified(req.uid);
   const fullName = String(req.body?.fullName || '').trim().replace(/\s+/g, ' ');
   const idType = req.body?.idType === 'nin' ? 'nin' : 'bvn';
   const idNumber = String(req.body?.idNumber || '').trim();
@@ -174,7 +210,7 @@ app.post('/kyc/verify', auth, h(async (req, res) => {
 app.get('/wallet', auth, h(async (req, res) => {
   const r = await q('SELECT kind, balance FROM accounts WHERE user_id=$1', [req.uid]);
   const u = (await q(
-    'SELECT account_number, email, referral_code, kyc_verified, full_name, virtual_account, virtual_bank FROM users WHERE id=$1', [req.uid])).rows[0];
+    'SELECT account_number, email, referral_code, kyc_verified, email_verified, full_name, virtual_account, virtual_bank FROM users WHERE id=$1', [req.uid])).rows[0];
   const bal = Object.fromEntries(r.rows.map((x) => [x.kind, Number(x.balance)]));
   res.json({ ...u, mainKobo: bal.main, bonusKobo: bal.bonus });
 }));
@@ -188,6 +224,7 @@ app.get('/wallet/history', auth, h(async (req, res) => {
 }));
 
 app.post('/transfer/internal', auth, h(async (req, res) => {
+  await requireEmailVerified(req.uid);
   const { toAccount, amount, pin, idemKey } = req.body || {};
   if (!validAmount(amount) || !idemKey) throw httpErr(400, 'Invalid request');
   await checkPin(req.uid, pin);
@@ -205,6 +242,7 @@ app.post('/transfer/internal', auth, h(async (req, res) => {
 }));
 
 app.post('/transfer/bank', auth, h(async (req, res) => {
+  await requireEmailVerified(req.uid);
   const { accountNumber, bankCode, amount, pin, idemKey } = req.body || {};
   if (!validAmount(amount) || !idemKey || !/^\d{10}$/.test(accountNumber || '') || !bankCode) throw httpErr(400, 'Invalid request');
   await checkPin(req.uid, pin);
