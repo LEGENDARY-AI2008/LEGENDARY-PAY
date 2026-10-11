@@ -26,17 +26,20 @@ export function verifyWebhook(sig) {
 }
 
 // Creates the user's personal funding account (a permanent virtual account).
-export async function createReservedAccount({ userId, email, fullName, phone, bvn }) {
+// Accepts a BVN or a NIN. Only one is sent.
+// NOT YET VERIFIED: confirm Flutterwave accepts the `nin` field on virtual accounts with a real test.
+export async function createReservedAccount({ userId, email, fullName, phone, bvn, nin }) {
   if (!live()) {
     if (!sandbox()) throw new Error('Flutterwave key is missing');
     return { accountNumber: '9' + String(crypto.randomInt(0, 1e9)).padStart(9, '0'), bankName: 'Sandbox Bank' };
   }
-  if (!bvn) throw Object.assign(new Error('Your BVN is needed to create your funding account'), { status: 400 });
+  if (!bvn && !nin) throw Object.assign(new Error('Your BVN or NIN is needed to create your funding account'), { status: 400 });
   const parts = fullName.split(' ');
   const first = parts[0];
   const last = parts.slice(1).join(' ') || first;
+  const id = bvn ? { bvn } : { nin };
   const r = await call('/virtual-account-numbers', 'POST', {
-    email, is_permanent: true, bvn, phonenumber: phone, firstname: first, lastname: last,
+    email, is_permanent: true, ...id, phonenumber: phone, firstname: first, lastname: last,
     narration: `${fullName} Legendary Pay`, tx_ref: `va-${userId}`,
   });
   if (!r.ok || !r.data?.account_number) {

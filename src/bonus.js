@@ -25,7 +25,14 @@ export async function evaluateUser(userId) {
     if (!u.referred_by) return;
     const r = (await c.query('SELECT id, device_id FROM users WHERE id=$1', [u.referred_by])).rows[0];
     if (!r || r.id === u.id) return;
-    if (u.device_id && r.device_id === u.device_id) return; // same device = self-referral
+    // No device ID, or the same device as the referrer = self-referral. Block it.
+    if (!u.device_id || r.device_id === u.device_id) return;
+    // One referral reward per device: if a referee on this device already earned one, stop.
+    const devicePaid = (await c.query(
+      `SELECT 1 FROM bonus_grants g JOIN users x ON x.id::text = g.ref
+       WHERE g.type='referral' AND g.status<>'void' AND x.device_id=$1 LIMIT 1`, [u.device_id]
+    )).rowCount;
+    if (devicePaid) return;
     const n = Number((await c.query(
       `SELECT COUNT(*) AS n FROM bonus_grants WHERE user_id=$1 AND type='referral' AND status<>'void'
        AND created_at > now() - interval '30 days'`, [r.id]

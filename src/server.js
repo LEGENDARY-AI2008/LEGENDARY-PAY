@@ -14,6 +14,9 @@ import { settlePayout } from './payouts.js';
 import { createReservedAccount, listBanks, resolveBankAccount, verifyWebhook, payBill } from './flutterwave.js';
 import { sendMail } from './mail.js';
 import { alert } from './alert.js';
+import { mountFeatures, applyRoundUp } from './features.js';
+import { mountSupport } from './support.js';
+import { mountWebAuthn, verifyApproval } from './webauthn.js';
 
 const sandbox = process.env.SANDBOX === '1';
 const required = ['DATABASE_URL', 'JWT_SECRET',
@@ -53,7 +56,10 @@ const validAmount = (n) => Number.isInteger(n) && n >= 1000 && n <= 50_000_000; 
 const validEmail = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(e);
 const isUuid = (s) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(s));
 // Emails a user in the background. Never blocks the request; failures are only logged.
+// Saves the message in the app's notification list and emails it. Failures are only logged.
 function notify(userId, subject, text) {
+  q('INSERT INTO notifications(user_id, title, body) VALUES($1,$2,$3)', [userId, subject, text])
+    .catch((e) => console.error('notification save failed', e.message));
   q('SELECT email FROM users WHERE id=$1', [userId])
     .then((r) => (r.rows[0]?.email ? sendMail(r.rows[0].email, subject, text) : null))
     .catch((e) => console.error('notify failed', e.message));
@@ -79,8 +85,10 @@ async function admin(req, res, next) {
   });
 }
 
-async function checkPin(userId, pin) {
-  const u = (await q('SELECT pin_hash, pin_fails, locked_until FROM users WHERE id=$1', [userId])).rows[0];
+// Every debit is approved by fingerprint (approval) or by the 4-digit PIN.
+async function checkPin(userId, pin, approval) {
+  if (approval) return verifyApproval({ q, httpErr, uid: userId, approval });
+  const u =(await q('SELECT pin_hash, pin_fails, locked_until FROM users WHERE id=$1', [userId])).rows[0];
   if (!u) throw httpErr(401, 'Unauthorized');
   if (u.locked_until && u.locked_until > new Date()) throw httpErr(423, 'PIN locked, try again later');
   if (await bcrypt.compare(String(pin || ''), u.pin_hash)) {
@@ -215,6 +223,7 @@ app.post('/kyc/verify', auth, h(async (req, res) => {
   const acc = await createReservedAccount({
     userId: u.id, email: u.email, fullName, phone: u.phone,
     bvn: idType === 'bvn' ? idNumber : undefined,
+    nin: idType === 'nin' ? idNumber : undefined,
   });
   try {
     await q(`UPDATE users SET full_name=$2, kyc_hash=$3, kyc_verified=true, virtual_account=$4, virtual_bank=$5 WHERE id=$1`,
@@ -264,6 +273,7 @@ app.get('/wallet/receipt/:id', auth, h(async (req, res) => {
     amountKobo: Number(j.amount),
     at: j.created_at,
     reference: j.meta?.reference || null,
+    note: j.meta?.note || null,
     bankAccount: payout ? payout.account_number : null,
     feeKobo: payout ? Number(payout.fee) : 0,
     status: payout ? payout.status : 'success',
@@ -304,15 +314,28 @@ app.get('/rewards/list', auth, h(async (req, res) => {
 
 app.post('/transfer/internal', auth, h(async (req, res) => {
   await requireEmailVerified(req.uid);
-  const { toAccount, amount, pin, idemKey, saveAs } = req.body || {};
+  const { toAccount, amount, pin, idemKey, saveAs, note, requestId } = req.body || {};
   if (!validAmount(amount) || !idemKey) throw httpErr(400, 'Invalid request');
-  await checkPin(req.uid, pin);
+  await checkPin(req.uid, pin, req.body?.approval);
   await checkLimit(req.uid, await isVerified(req.uid), amount);
   const to = (await q('SELECT id FROM users WHERE account_number=$1', [toAccount])).rows[0];
   if (!to || to.id === req.uid) throw httpErr(400, 'Invalid recipient');
+  const cleanNote = String(note || '').trim().slice(0, 60);
+  // Paying a money request: it must still be pending, for this amount, to the person who asked.
+  let reqRow = null;
+  if (requestId) {
+    if (!/^\d+$/.test(String(requestId))) throw httpErr(400, 'Invalid request');
+    reqRow = (await q(
+      `SELECT id, from_user, amount FROM money_requests WHERE id=$1 AND to_user=$2 AND status='pending'`,
+      [requestId, req.uid])).rows[0];
+    if (!reqRow || Number(reqRow.amount) !== amount || reqRow.from_user !== to.id) {
+      throw httpErr(400, 'That payment request is no longer valid');
+    }
+  }
   const r = await tx(async (c) => {
     const p = await post(c, {
-      idem: `it:${req.uid}:${idemKey}`, kind: 'internal_transfer', userId: req.uid, meta: { amount, to: to.id },
+      idem: `it:${req.uid}:${idemKey}`, kind: 'internal_transfer', userId: req.uid,
+      meta: { amount, to: to.id, note: cleanNote || undefined },
       legs: [{ account: `u:${req.uid}:main`, amount: -amount }, { account: `u:${to.id}:main`, amount }],
     });
     await enqueue(c, 'evaluate_bonuses', { userId: req.uid });
@@ -321,6 +344,8 @@ app.post('/transfer/internal', auth, h(async (req, res) => {
   if (!r.duplicate) {
     notify(req.uid, 'Money sent', `You sent ${naira(amount)} to wallet ${toAccount}.`);
     notify(to.id, 'Money received', `You received ${naira(amount)} from another Legendary Pay wallet.`);
+    if (reqRow) await q(`UPDATE money_requests SET status='paid' WHERE id=$1`, [reqRow.id]);
+    await applyRoundUp({ q, tx, uid: req.uid, amount, idem: `it:${req.uid}:${idemKey}` });
   }
   if (saveAs) await saveBeneficiary(req.uid, { type: 'wallet', label: saveAs, accountNumber: toAccount }).catch(() => {});
   res.json({ status: 'success' });
@@ -329,8 +354,9 @@ app.post('/transfer/internal', auth, h(async (req, res) => {
 app.post('/transfer/bank', auth, h(async (req, res) => {
   await requireEmailVerified(req.uid);
   const { accountNumber, bankCode, amount, pin, idemKey, saveAs } = req.body || {};
+  const bankNote = String(req.body?.note || '').trim().slice(0, 60);
   if (!validAmount(amount) || !idemKey || !/^\d{10}$/.test(accountNumber || '') || !bankCode) throw httpErr(400, 'Invalid request');
-  await checkPin(req.uid, pin);
+  await checkPin(req.uid, pin, req.body?.approval);
   const verified = await isVerified(req.uid);
   if (!verified) throw httpErr(403, 'Verify your identity to send money to banks');
   await checkLimit(req.uid, verified, amount);
@@ -340,7 +366,7 @@ app.post('/transfer/bank', auth, h(async (req, res) => {
   const idem = `bt:${req.uid}:${idemKey}`;
   const r = await tx(async (c) => {
     const r = await post(c, {
-      idem, kind: 'bank_transfer', userId: req.uid, meta: { amount, bankCode, accountNumber },
+      idem, kind: 'bank_transfer', userId: req.uid, meta: { amount, bankCode, accountNumber, note: bankNote || undefined },
       legs: [
         { account: `u:${req.uid}:main`, amount: -(amount + fee) },
         { account: 'sys:external', amount: amount + pf },
@@ -358,7 +384,8 @@ app.post('/transfer/bank', auth, h(async (req, res) => {
     await enqueue(c, 'evaluate_bonuses', { userId: req.uid });
     return r;
   });
-  if (!r.duplicate) notify(req.uid, 'Bank transfer started', `Your transfer of ${naira(amount)} to account ${accountNumber} is processing. We will email you when it is done.`);
+  if (!r.duplicate) await applyRoundUp({ q, tx, uid: req.uid, amount, idem: `bt:${req.uid}:${idemKey}` });
+  if (!r.duplicate) notify(req.uid, 'Bank transfer started',`Your transfer of ${naira(amount)} to account ${accountNumber} is processing. We will email you when it is done.`);
   if (saveAs) await saveBeneficiary(req.uid, { type: 'bank', label: saveAs, accountNumber, bankCode }).catch(() => {});
   res.status(202).json({ status: 'processing', feeKobo: fee });
 }));
@@ -469,7 +496,7 @@ app.post('/goals/:id/move', auth, h(async (req, res) => {
   if (!/^\d+$/.test(req.params.id)) throw httpErr(404, 'Goal not found');
   const { amount, direction, pin, idemKey } = req.body || {};
   if (!validAmount(amount) || !idemKey || !['in', 'out'].includes(direction)) throw httpErr(400, 'Invalid request');
-  await checkPin(req.uid, pin);
+  await checkPin(req.uid, pin, req.body?.approval);
   const g = (await q('SELECT account_code FROM goals WHERE id=$1 AND user_id=$2', [req.params.id, req.uid])).rows[0];
   if (!g) throw httpErr(404, 'Goal not found');
   const into = direction === 'in';
@@ -514,7 +541,7 @@ app.post('/bills/airtime', auth, h(async (req, res) => {
   if (!NETWORKS.includes(network) || !/^0\d{10}$/.test(phone || '') || !validAmount(amount) || !idemKey) {
     throw httpErr(400, 'Invalid request');
   }
-  await checkPin(req.uid, pin);
+  await checkPin(req.uid, pin, req.body?.approval);
   const reference = `airtime-${req.uid}-${idemKey}`;
   const existing = (await q('SELECT status FROM bill_payments WHERE reference=$1', [reference])).rows[0];
   if (existing) {
@@ -641,6 +668,10 @@ if (sandbox) {
     res.json({ ok: true });
   }));
 }
+
+mountFeatures(app, { auth, h, q, tx, httpErr, validAmount, checkPin, requireEmailVerified, naira, maskName, notifyUser: notify, settings });
+mountSupport(app, { auth, admin, h, q, httpErr, notifyUser: notify });
+mountWebAuthn(app, { auth, h, q, httpErr, sign, notifyUser: notify });
 
 app.get('/', (_req, res) => res.json({ ok: true }));
 

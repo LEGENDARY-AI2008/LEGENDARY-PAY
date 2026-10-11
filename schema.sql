@@ -163,3 +163,98 @@ CREATE TABLE IF NOT EXISTS bill_payments (
   error text,
   created_at timestamptz NOT NULL DEFAULT now()
 );
+
+-- ===== notifications, money requests, reminders, check-ins, budgets, schedules, round-up =====
+CREATE TABLE IF NOT EXISTS notifications (
+  id bigserial PRIMARY KEY,
+  user_id uuid NOT NULL REFERENCES users(id),
+  title text NOT NULL,
+  body text NOT NULL,
+  read boolean NOT NULL DEFAULT false,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS notifications_user ON notifications(user_id, id);
+
+CREATE TABLE IF NOT EXISTS money_requests (
+  id bigserial PRIMARY KEY,
+  from_user uuid NOT NULL REFERENCES users(id),   -- the one asking for money
+  to_user uuid NOT NULL REFERENCES users(id),     -- the one who should pay
+  amount bigint NOT NULL,
+  note text NOT NULL DEFAULT '',
+  status text NOT NULL DEFAULT 'pending',         -- pending | paid | declined
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS reminders (
+  id bigserial PRIMARY KEY,
+  user_id uuid NOT NULL REFERENCES users(id),
+  title text NOT NULL,
+  amount bigint NOT NULL DEFAULT 0,
+  due_date date NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS checkins (
+  user_id uuid NOT NULL REFERENCES users(id),
+  day date NOT NULL,
+  streak int NOT NULL,
+  PRIMARY KEY (user_id, day)
+);
+
+CREATE TABLE IF NOT EXISTS budgets (
+  user_id uuid NOT NULL REFERENCES users(id),
+  category text NOT NULL,
+  limit_kobo bigint NOT NULL,
+  PRIMARY KEY (user_id, category)
+);
+
+CREATE TABLE IF NOT EXISTS schedules (
+  id bigserial PRIMARY KEY,
+  user_id uuid NOT NULL REFERENCES users(id),
+  kind text NOT NULL,                 -- transfer | save
+  label text NOT NULL DEFAULT '',
+  amount bigint NOT NULL,
+  frequency text NOT NULL,            -- weekly | monthly
+  to_account text,
+  goal_id bigint,
+  next_run timestamptz NOT NULL,
+  active boolean NOT NULL DEFAULT true,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS roundup_goal bigint;
+
+-- Live chat support
+CREATE TABLE IF NOT EXISTS support_threads (
+  id bigserial PRIMARY KEY,
+  user_id uuid NOT NULL REFERENCES users(id),
+  status text NOT NULL DEFAULT 'open',
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS support_threads_user ON support_threads(user_id, status);
+CREATE TABLE IF NOT EXISTS support_messages (
+  id bigserial PRIMARY KEY,
+  thread_id bigint NOT NULL REFERENCES support_threads(id),
+  sender text NOT NULL CHECK (sender IN ('user','admin')),
+  body text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS support_messages_thread ON support_messages(thread_id, id);
+
+-- Fingerprint (passkeys): only public keys are stored, never fingerprint data
+CREATE TABLE IF NOT EXISTS webauthn_credentials (
+  id text PRIMARY KEY,
+  user_id uuid NOT NULL REFERENCES users(id),
+  public_key text NOT NULL,
+  counter bigint NOT NULL DEFAULT 0,
+  name text,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS webauthn_credentials_user ON webauthn_credentials(user_id);
+CREATE TABLE IF NOT EXISTS webauthn_challenges (
+  challenge text PRIMARY KEY,
+  purpose text NOT NULL,
+  user_id uuid REFERENCES users(id),
+  expires_at timestamptz NOT NULL
+);
