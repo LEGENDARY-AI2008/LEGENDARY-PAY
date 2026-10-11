@@ -127,3 +127,85 @@ export async function payBill({ reference, customer, amount, network }) {
   if (s === 'failed') return { status: 'failed', msg: r.msg };
   return { status: 'pending', msg: r.msg };
 }
+
+// ---------- data, electricity and cable bills (UNVERIFIED against the live API) ----------
+// The first real call shows whether these paths and fields are right. Check them in the Flutterwave
+// dashboard before going live: the category names, the biller/item codes and the validate response.
+// Sandbox mode (SANDBOX=1, no key) returns fixed test data so the screens can be tested.
+const SANDBOX_BILLERS = {
+  DATA: [{ code: 'MTN_DATA', name: 'MTN Data' }, { code: 'GLO_DATA', name: 'Glo Data' }, { code: 'AIRTEL_DATA', name: 'Airtel Data' }, { code: '9MOBILE_DATA', name: '9mobile Data' }],
+  ELECTRICITY: [{ code: 'EKEDC', name: 'Eko Electric (EKEDC)' }, { code: 'IKEDC', name: 'Ikeja Electric (IKEDC)' }],
+  CABLE: [{ code: 'DSTV', name: 'DStv' }, { code: 'GOTV', name: 'GOtv' }, { code: 'STARTIMES', name: 'StarTimes' }],
+  EXAM: [{ code: 'WAEC', name: 'WAEC' }, { code: 'NECO', name: 'NECO' }, { code: 'JAMB', name: 'JAMB' }],
+  INTERNET: [{ code: 'SPECTRANET', name: 'Spectranet' }, { code: 'SMILE', name: 'Smile' }],
+  BETTING: [{ code: 'BET9JA', name: 'Bet9ja' }, { code: 'SPORTYBET', name: 'SportyBet' }],
+  WATER: [{ code: 'WATER_A', name: 'Water provider A' }, { code: 'WATER_B', name: 'Water provider B' }],
+  INSURANCE: [{ code: 'INS_A', name: 'Insurance provider A' }],
+  WASTE: [{ code: 'WASTE_A', name: 'Waste provider A' }],
+  SCHOOL: [{ code: 'SCHOOL_A', name: 'School fees provider A' }],
+};
+const CATEGORY_CODE = {
+  DATA: 'DATA_BUNDLE', ELECTRICITY: 'ELECTRICITY_BILL', CABLE: 'CABLE_TV',
+  EXAM: 'EXAM_PIN', INTERNET: 'INTERNET_SERVICE', BETTING: 'BETTING_WALLET',
+  WATER: 'WATER_BILL', INSURANCE: 'INSURANCE_PREMIUM', WASTE: 'WASTE_BILL', SCHOOL: 'SCHOOL_FEES',
+};
+
+export async function listBillers(category) {
+  if (!live()) {
+    if (!sandbox()) throw new Error('Flutterwave key is missing');
+    return SANDBOX_BILLERS[category] || [];
+  }
+  const r = await call(`/billers?country=NG&category=${CATEGORY_CODE[category]}`);
+  if (!r.ok) throw new Error(r.msg || 'Could not load providers');
+  return (r.data || []).map((b) => ({ code: b.biller_code, name: b.name }));
+}
+
+// Items are plans (data bundles, cable packages) or meter types for electricity.
+// amount is in naira; amountKobo is 0 when the amount is chosen by the user.
+export async function listBillerItems(billerCode, category) {
+  if (!live()) {
+    if (!sandbox()) throw new Error('Flutterwave key is missing');
+    if (category === 'ELECTRICITY') return [{ code: 'PREPAID', name: 'Prepaid meter', amountKobo: 0 }, { code: 'POSTPAID', name: 'Postpaid meter', amountKobo: 0 }];
+    if (category === 'DATA') return [{ code: `${billerCode}-1GB`, name: '1GB, 30 days', amountKobo: 100_000 }, { code: `${billerCode}-2GB`, name: '2GB, 30 days', amountKobo: 200_000 }];
+    if (['WATER', 'INSURANCE', 'WASTE', 'SCHOOL'].includes(category)) return [{ code: `${billerCode}-BILL`, name: 'Bill payment', amountKobo: 0 }];
+    if (category === 'EXAM') return [{ code: `${billerCode}-PIN`, name: `${billerCode} result checker PIN`, amountKobo: 360_000 }];
+    if (category === 'INTERNET') return [{ code: `${billerCode}-1MTH`, name: '1 month plan', amountKobo: 1_500_000 }];
+    if (category === 'BETTING') return [{ code: `${billerCode}-FUND`, name: 'Wallet funding', amountKobo: 0 }];
+    return [{ code: `${billerCode}-BASIC`, name: 'Basic', amountKobo: 1_850_000 }, { code: `${billerCode}-FULL`, name: 'Full', amountKobo: 2_500_000 }];
+  }
+  const r = await call(`/billers/${encodeURIComponent(billerCode)}/items`);
+  if (!r.ok) throw new Error(r.msg || 'Could not load plans');
+  return (r.data || []).map((i) => ({
+    code: i.item_code, name: i.name, amountKobo: Math.round(Number(i.amount || 0) * 100),
+  }));
+}
+
+// Checks the meter or smartcard number and returns the owner's name, before any money moves.
+export async function validateBillCustomer({ billerCode, itemCode, customer }) {
+  if (!live()) {
+    if (!sandbox()) throw new Error('Flutterwave key is missing');
+    return { name: 'Test Customer' };
+  }
+  const r = await call(`/billers/${encodeURIComponent(billerCode)}/items/${encodeURIComponent(itemCode)}/validate?customer=${encodeURIComponent(customer)}`);
+  if (!r.ok) throw new Error(r.msg || 'Could not check this number');
+  return { name: r.data?.name || r.data?.customer_name || 'Customer found' };
+}
+
+// Pays a bill. Same return contract as payBill(): 'success' | 'pending' | 'failed'.
+export async function payBillItem({ reference, category, billerCode, itemCode, customer, amountKobo }) {
+  if (!live()) {
+    if (!sandbox()) throw new Error('Flutterwave key is missing');
+    console.log(`[sandbox bill] ${reference} ${category} ${billerCode}/${itemCode} ${amountKobo} to ${customer}`);
+    return { status: 'success' };
+  }
+  const r = await call('/bills', 'POST', {
+    country: 'NG', customer, amount: amountKobo / 100, recurrence: 'ONCE',
+    type: itemCode, biller_code: billerCode, reference,
+  });
+  if (r.http >= 500 || !r.data && !r.ok) return { status: 'pending', msg: r.msg };
+  if (!r.ok) return { status: 'failed', msg: r.msg };
+  const s = String(r.data?.status || '').toLowerCase();
+  if (s === 'successful' || s === 'success') return { status: 'success' };
+  if (s === 'failed') return { status: 'failed', msg: r.msg };
+  return { status: 'pending', msg: r.msg };
+}

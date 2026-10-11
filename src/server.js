@@ -17,6 +17,9 @@ import { alert } from './alert.js';
 import { mountFeatures, applyRoundUp } from './features.js';
 import { mountSupport } from './support.js';
 import { mountWebAuthn, verifyApproval } from './webauthn.js';
+import { mountTransactions } from './transactions.js';
+import { mountBills } from './bills.js';
+import { mountAccount } from './account.js';
 
 const sandbox = process.env.SANDBOX === '1';
 const required = ['DATABASE_URL', 'JWT_SECRET',
@@ -65,9 +68,16 @@ function notify(userId, subject, text) {
     .catch((e) => console.error('notify failed', e.message));
 }
 
+// Checks the token, then that the account has not been deleted (a deleted account's old token stops working at once).
 function auth(req, _res, next) {
-  try { req.uid = jwt.verify((req.get('authorization') || '').replace('Bearer ', ''), process.env.JWT_SECRET).uid; next(); }
-  catch { next(httpErr(401, 'Unauthorized')); }
+  let uid;
+  try { uid = jwt.verify((req.get('authorization') || '').replace('Bearer ', ''), process.env.JWT_SECRET).uid; }
+  catch { return next(httpErr(401, 'Unauthorized')); }
+  q('SELECT deleted_at FROM users WHERE id=$1', [uid]).then((r) => {
+    if (!r.rows[0] || r.rows[0].deleted_at) return next(httpErr(401, 'Unauthorized'));
+    req.uid = uid;
+    next();
+  }).catch(next);
 }
 // Admin = the account whose verified email equals ADMIN_EMAIL. It logs in like any other user.
 const isAdminUser = (u) => {
@@ -172,7 +182,7 @@ app.post('/auth/resend-verify', auth, h(async (req, res) => {
 app.post('/auth/login', h(async (req, res) => {
   const { identifier, phone, pin } = req.body || {};
   const idf = String(identifier || phone || '').trim().toLowerCase();
-  const u = (await q('SELECT id FROM users WHERE phone=$1 OR email=$1', [idf])).rows[0];
+  const u = (await q('SELECT id FROM users WHERE (phone=$1 OR email=$1) AND deleted_at IS NULL', [idf])).rows[0];
   if (!u) throw httpErr(401, 'Wrong phone/email or PIN');
   await checkPin(u.id, pin);
   res.json({ token: sign(u.id) });
@@ -593,7 +603,21 @@ app.get('/admin/stats', admin, h(async (_req, res) => {
      (SELECT COUNT(*) FROM payouts WHERE status='queued') AS queued_payouts,
      (SELECT COUNT(*) FROM bill_payments WHERE status='pending') AS pending_bills,
      (SELECT COUNT(*) FROM journal WHERE created_at >= now() - interval '24 hours') AS tx_24h`)).rows[0];
+  // Profit = the balance of sys:revenue (our fees, minus any refunded fees).
+  const pr = (await q(`SELECT
+     COALESCE(SUM(e.amount),0) AS total,
+     COALESCE(SUM(e.amount) FILTER (WHERE j.created_at >= date_trunc('day', now() AT TIME ZONE 'Africa/Lagos') AT TIME ZONE 'Africa/Lagos'),0) AS today,
+     COALESCE(SUM(e.amount) FILTER (WHERE j.created_at >= date_trunc('week', now() AT TIME ZONE 'Africa/Lagos') AT TIME ZONE 'Africa/Lagos'),0) AS week,
+     COALESCE(SUM(e.amount) FILTER (WHERE j.created_at >= date_trunc('month', now() AT TIME ZONE 'Africa/Lagos') AT TIME ZONE 'Africa/Lagos'),0) AS month
+   FROM entries e JOIN accounts a ON a.id = e.account_id JOIN journal j ON j.id = e.journal_id
+   WHERE a.code = 'sys:revenue'`)).rows[0];
+  const byKind = (await q(`SELECT j.kind, SUM(e.amount) AS total FROM entries e
+     JOIN accounts a ON a.id = e.account_id JOIN journal j ON j.id = e.journal_id
+     WHERE a.code = 'sys:revenue' GROUP BY j.kind ORDER BY total DESC`)).rows;
   res.json({
+    profitKobo: Number(pr.total), profitTodayKobo: Number(pr.today),
+    profitWeekKobo: Number(pr.week), profitMonthKobo: Number(pr.month),
+    profitByKind: byKind.map((r) => ({ kind: r.kind, kobo: Number(r.total) })),
     totalUsers: Number(s.total_users), kycUsers: Number(s.kyc_users), emailUsers: Number(s.email_users),
     heldKobo: Number(s.held), queuedPayouts: Number(s.queued_payouts),
     pendingBills: Number(s.pending_bills), tx24h: Number(s.tx_24h),
@@ -672,6 +696,9 @@ if (sandbox) {
 mountFeatures(app, { auth, h, q, tx, httpErr, validAmount, checkPin, requireEmailVerified, naira, maskName, notifyUser: notify, settings });
 mountSupport(app, { auth, admin, h, q, httpErr, notifyUser: notify });
 mountWebAuthn(app, { auth, h, q, httpErr, sign, notifyUser: notify });
+mountTransactions(app, { auth, h, q, httpErr, naira });
+mountBills(app, { auth, h, q, tx, post, httpErr, alert, checkPin, requireEmailVerified, validAmount });
+mountAccount(app, { auth, h, q, tx, httpErr, checkPin });
 
 app.get('/', (_req, res) => res.json({ ok: true }));
 

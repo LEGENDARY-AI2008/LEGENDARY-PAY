@@ -258,3 +258,6 @@ CREATE TABLE IF NOT EXISTS webauthn_challenges (
   user_id uuid REFERENCES users(id),
   expires_at timestamptz NOT NULL
 );
+
+-- account deletion: deleted users keep their money records but cannot sign in
+ALTER TABLE users ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
