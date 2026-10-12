@@ -158,24 +158,65 @@ const SANDBOX_BILLERS = {
   SCHOOL: [{ code: 'SCHOOL_A', name: 'School fees provider A' }],
 };
 
-// Query flag that the SDK's getCategories() sends for each service. Services without a flag return no providers.
+// Query flag that the SDK's getCategories() sends for each service.
 const CATEGORY_FLAG = { DATA: 'data_bundle', ELECTRICITY: 'power', CABLE: 'cable', INTERNET: 'internet' };
+
+// Services with no flag: Flutterwave's flag-less list is searched by provider name instead.
+const KEYWORDS = {
+  EXAM: /WAEC|NECO|JAMB|NABTEB|EXAM|RESULT CHECK/i,
+  BETTING: /BET9JA|BETKING|1XBET|BETWAY|NAIRABET|SPORTYBET|MERRYBET|BETBIGA|BETLION|BETTING|SPORT/i,
+  WATER: /WATER/i,
+  INSURANCE: /INSUR|AIICO|LEADWAY|AXA|SUNU|HYGEIA/i,
+  WASTE: /WASTE|RUBBISH|SANITAT/i,
+  SCHOOL: /SCHOOL|TUITION|UNIVERSITY|POLYTECHNIC|COLLEGE|ACADEMY/i,
+};
+
+// Data bundles are grouped by provider code, and the network name is found in the plan names.
+const NETWORK_WORDS = [['MTN', /\bMTN\b/i], ['Glo', /\bGLO\b/i], ['Airtel', /AIRTEL/i], ['9mobile', /9\s?MOBILE|ETISALAT/i]];
+
+let allRowsCache = { v: null, exp: 0 };
+async function allBillRows() {
+  if (allRowsCache.v && Date.now() < allRowsCache.exp) return allRowsCache.v;
+  const r = await call('/bill-categories');
+  if (!r.ok) throw new Error(r.msg || 'Could not load providers');
+  allRowsCache = { v: r.data || [], exp: Date.now() + 3600 * 1000 };
+  return allRowsCache.v;
+}
 
 export async function listBillers(category) {
   if (!live()) {
     if (!sandbox()) throw new Error('Flutterwave key is missing');
     return SANDBOX_BILLERS[category] || [];
   }
-  const flag = CATEGORY_FLAG[category];
-  if (!flag) return [];
-  const r = await call(`/bill-categories?${flag}=1`);
-  if (!r.ok) throw new Error(r.msg || 'Could not load providers');
-  // The response lists one row per plan, so keep one row per provider.
-  const seen = new Map();
-  for (const b of r.data || []) {
-    if (!seen.has(b.biller_code)) seen.set(b.biller_code, { code: b.biller_code, name: b.biller_name || b.name || b.biller_code });
+  let rows;
+  if (CATEGORY_FLAG[category]) {
+    const r = await call(`/bill-categories?${CATEGORY_FLAG[category]}=1`);
+    if (!r.ok) throw new Error(r.msg || 'Could not load providers');
+    rows = r.data || [];
+  } else if (KEYWORDS[category]) {
+    const re = KEYWORDS[category];
+    rows = (await allBillRows()).filter((b) => re.test(`${b.name || ''} ${b.biller_name || ''} ${b.short_name || ''}`));
+  } else {
+    return [];
   }
-  return [...seen.values()];
+  // The response lists one row per plan, so group the rows by provider code.
+  const groups = new Map();
+  for (const b of rows) {
+    const g = groups.get(b.biller_code) || { code: b.biller_code, texts: [], first: b };
+    g.texts.push(`${b.name || ''} ${b.biller_name || ''} ${b.short_name || ''}`);
+    groups.set(b.biller_code, g);
+  }
+  return [...groups.values()].map((g) => {
+    if (category === 'DATA') {
+      const hit = NETWORK_WORDS.find(([, re]) => g.texts.some((t) => re.test(t)));
+      return { code: g.code, name: hit ? hit[0] : `Other network (${g.code})` };
+    }
+    if (KEYWORDS[category]) {
+      const label = String(g.first.biller_name || g.first.name || g.code).slice(0, 40);
+      return { code: g.code, name: label };
+    }
+    return { code: g.code, name: g.first.biller_name || g.first.name || g.code };
+  });
 }
 
 // Items are plans (data bundles, cable packages) or meter types for electricity.
