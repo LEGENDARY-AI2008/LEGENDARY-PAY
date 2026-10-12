@@ -665,7 +665,7 @@ app.get('/admin/stats', admin, h(async (_req, res) => {
 app.get('/admin/users', admin, h(async (req, res) => {
   const term = `%${String(req.query.q || '').trim()}%`;
   const r = await q(
-    `SELECT u.id, u.full_name, u.phone, u.email, u.account_number, u.kyc_verified, u.email_verified, u.created_at,
+    `SELECT u.id, u.full_name, u.phone, u.email, u.account_number, u.kyc_verified, u.email_verified, u.created_at, u.staff_role,
        COALESCE((SELECT balance FROM accounts a WHERE a.code = 'u:' || u.id::text || ':main'), 0) AS main
      FROM users u
      WHERE $1 = '%%' OR u.phone ILIKE $1 OR u.email ILIKE $1 OR u.full_name ILIKE $1 OR u.account_number ILIKE $1
@@ -673,6 +673,7 @@ app.get('/admin/users', admin, h(async (req, res) => {
   res.json(r.rows.map((u) => ({
     id: u.id, name: u.full_name, phone: u.phone, email: u.email, accountNumber: u.account_number,
     kycVerified: u.kyc_verified, emailVerified: u.email_verified, createdAt: u.created_at, mainKobo: Number(u.main),
+    staffRole: u.staff_role,
   })));
 }));
 
