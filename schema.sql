@@ -261,3 +261,53 @@ CREATE TABLE IF NOT EXISTS webauthn_challenges (
 
 -- account deletion: deleted users keep their money records but cannot sign in
 ALTER TABLE users ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
+
+-- support staff: role on the user, a system account for balance adjustments, and an audit log
+ALTER TABLE users ADD COLUMN IF NOT EXISTS staff_role text;
+INSERT INTO accounts(code, kind, allow_negative) VALUES ('sys:adjust','adjust',true) ON CONFLICT DO NOTHING;
+CREATE TABLE IF NOT EXISTS staff_audit (
+  id bigserial PRIMARY KEY,
+  staff_id uuid NOT NULL REFERENCES users(id),
+  action text NOT NULL,
+  target_user_id uuid REFERENCES users(id),
+  amount_kobo bigint,
+  reason text NOT NULL,
+  ref text,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS staff_audit_created ON staff_audit(created_at);
+
+-- broadcast emails: users who clicked unsubscribe
+ALTER TABLE users ADD COLUMN IF NOT EXISTS marketing_opt_out boolean NOT NULL DEFAULT false;
+
+-- web push: one row per device (browser) a user allowed; app_kv keeps the VAPID keys if not set in env
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  id bigserial PRIMARY KEY,
+  user_id uuid NOT NULL REFERENCES users(id),
+  endpoint text NOT NULL UNIQUE,
+  p256dh text NOT NULL,
+  auth text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS push_subscriptions_user ON push_subscriptions(user_id);
+CREATE TABLE IF NOT EXISTS app_kv (key text PRIMARY KEY, value text NOT NULL);
+
+-- repeating bills: the worker pays each one on its next date from the user's wallet
+CREATE TABLE IF NOT EXISTS bill_schedules (
+  id bigserial PRIMARY KEY,
+  user_id uuid NOT NULL REFERENCES users(id),
+  category text NOT NULL,
+  biller text NOT NULL,
+  item text NOT NULL,
+  plan_name text,
+  customer text NOT NULL,
+  amount_kobo bigint,
+  every_days int NOT NULL,
+  next_run timestamptz NOT NULL,
+  active boolean NOT NULL DEFAULT true,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS bill_schedules_due ON bill_schedules(active, next_run);
+
+-- bill cashback: share of the bill amount paid back to the user (200 = 2%, i.e. N2 per N100)
+INSERT INTO settings(key, value) VALUES ('bill_cashback_bps', 200) ON CONFLICT (key) DO NOTHING;

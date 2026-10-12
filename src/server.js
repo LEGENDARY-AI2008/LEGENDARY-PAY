@@ -18,8 +18,10 @@ import { mountFeatures, applyRoundUp } from './features.js';
 import { mountSupport } from './support.js';
 import { mountWebAuthn, verifyApproval } from './webauthn.js';
 import { mountTransactions } from './transactions.js';
-import { mountBills } from './bills.js';
+import { mountBills, billFeeKobo } from './bills.js';
 import { mountAccount } from './account.js';
+import { mountStaff } from './staff.js';
+import { pushUsers, pushToStaff, mountPush } from './push.js';
 
 const sandbox = process.env.SANDBOX === '1';
 const required = ['DATABASE_URL', 'JWT_SECRET',
@@ -66,6 +68,8 @@ function notify(userId, subject, text) {
   q('SELECT email FROM users WHERE id=$1', [userId])
     .then((r) => (r.rows[0]?.email ? sendMail(r.rows[0].email, subject, text) : null))
     .catch((e) => console.error('notify failed', e.message));
+  pushUsers([userId], { title: subject, body: String(text || '').slice(0, 140) })
+    .catch((e) => console.error('push failed', e.message));
 }
 
 // Checks the token, then that the account has not been deleted (a deleted account's old token stops working at once).
@@ -84,6 +88,17 @@ const isAdminUser = (u) => {
   const adminEmail = (process.env.ADMIN_EMAIL || '').trim().toLowerCase();
   return Boolean(adminEmail) && u?.email === adminEmail && u?.email_verified === true;
 };
+// Support staff or admins: used for the live chat inbox.
+async function staffOrAdmin(req, res, next) {
+  auth(req, res, async (err) => {
+    if (err) return next(err);
+    try {
+      const u = (await q('SELECT email, email_verified, staff_role FROM users WHERE id=$1', [req.uid])).rows[0];
+      if (!u || (!isAdminUser(u) && u.staff_role !== 'support')) return next(httpErr(403, 'Staff only'));
+      next();
+    } catch (e) { next(e); }
+  });
+}
 async function admin(req, res, next) {
   auth(req, res, async (err) => {
     if (err) return next(err);
@@ -250,7 +265,7 @@ app.post('/kyc/verify', auth, h(async (req, res) => {
 app.get('/wallet', auth, h(async (req, res) => {
   const r = await q('SELECT kind, balance FROM accounts WHERE user_id=$1', [req.uid]);
   const u = (await q(
-    'SELECT account_number, email, phone, referral_code, kyc_verified, email_verified, full_name, virtual_account, virtual_bank FROM users WHERE id=$1', [req.uid])).rows[0];
+    'SELECT account_number, email, phone, referral_code, kyc_verified, email_verified, full_name, virtual_account, virtual_bank, staff_role FROM users WHERE id=$1', [req.uid])).rows[0];
   const bal = Object.fromEntries(r.rows.map((x) => [x.kind, Number(x.balance)]));
   res.json({ ...u, mainKobo: bal.main, bonusKobo: bal.bonus, is_admin: isAdminUser(u) });
 }));
@@ -397,25 +412,34 @@ app.post('/transfer/bank', auth, h(async (req, res) => {
   if (!r.duplicate) await applyRoundUp({ q, tx, uid: req.uid, amount, idem: `bt:${req.uid}:${idemKey}` });
   if (!r.duplicate) notify(req.uid, 'Bank transfer started',`Your transfer of ${naira(amount)} to account ${accountNumber} is processing. We will email you when it is done.`);
   if (saveAs) await saveBeneficiary(req.uid, { type: 'bank', label: saveAs, accountNumber, bankCode }).catch(() => {});
-  res.status(202).json({ status: 'processing', feeKobo: fee });
+  res.status(202).json({ status: 'processing', feeKobo: fee, journalId: r.id || null });
 }));
 
 // ---------- Flutterwave webhook (deposits + payout results) ----------
 // Credits a deposit to the user. Deposits are matched by the email on the virtual account holder.
-async function creditDeposit({ reference, userId, email, amount }) {
+async function creditDeposit({ reference, userId, email, amount, settled }) {
   const out = await tx(async (c) => {
     const u = userId
       ? (await c.query('SELECT id FROM users WHERE id=$1', [userId])).rows[0]
       : (await c.query('SELECT id FROM users WHERE email=$1', [email || ''])).rows[0];
     if (!u) throw httpErr(404, 'unknown account');
+    // Flutterwave keeps its fee. The user is credited what Flutterwave settles (amount minus fee),
+    // and the fee goes to sys:revenue so the books still balance.
+    const credit = settled == null ? amount : Math.min(amount, settled);
+    const fee = amount - credit;
     const r = await post(c, {
-      idem: `dep:${reference}`, kind: 'deposit', userId: u.id, meta: { amount, reference },
-      legs: [{ account: 'sys:external', amount: -amount }, { account: `u:${u.id}:main`, amount }],
+      idem: `dep:${reference}`, kind: 'deposit', userId: u.id, meta: { amount, credit, fee, reference },
+      legs: fee > 0
+        ? [{ account: 'sys:external', amount: -amount }, { account: `u:${u.id}:main`, amount: credit }, { account: 'sys:revenue', amount: fee }]
+        : [{ account: 'sys:external', amount: -amount }, { account: `u:${u.id}:main`, amount }],
     });
     if (!r.duplicate) await enqueue(c, 'evaluate_bonuses', { userId: u.id });
     return { r, uid: u.id };
   });
-  if (!out.r.duplicate) notify(out.uid, 'Money received', `You received ${naira(amount)} in your Legendary Pay wallet. Reference: ${reference}.`);
+  if (!out.r.duplicate) {
+    const credit = settled == null ? amount : Math.min(amount, settled);
+    notify(out.uid, 'Money received', `You received ${naira(credit)} in your Legendary Pay wallet. Reference: ${reference}.`);
+  }
   return out.r;
 }
 
@@ -428,8 +452,11 @@ app.post('/webhooks/flutterwave', h(async (req, res) => {
     const amount = Math.round(Number(d.amount) * 100);
     const email = String(d.customer?.email || '').trim().toLowerCase();
     if (!d.id || !(amount > 0) || !email) throw httpErr(400, 'bad payload');
+    // amount_settled is what Flutterwave actually pays us after its fee. Missing means no fee taken.
+    const settled = d.amount_settled != null && Number.isFinite(Number(d.amount_settled))
+      ? Math.round(Number(d.amount_settled) * 100) : null;
     try {
-      await creditDeposit({ reference: String(d.id), email, amount });
+      await creditDeposit({ reference: String(d.id), email, amount, settled });
     } catch (e) {
       if (e.status === 404) await alert(`deposit for unknown account, ref ${d.id}, email ${email}`); else throw e;
     }
@@ -552,6 +579,9 @@ app.post('/bills/airtime', auth, h(async (req, res) => {
     throw httpErr(400, 'Invalid request');
   }
   await checkPin(req.uid, pin, req.body?.approval);
+  // Our 3% fee is added to the price. The provider is paid the face value only.
+  const fee = billFeeKobo(amount);
+  const total = amount + fee;
   const reference = `airtime-${req.uid}-${idemKey}`;
   const existing = (await q('SELECT status FROM bill_payments WHERE reference=$1', [reference])).rows[0];
   if (existing) {
@@ -565,8 +595,12 @@ app.post('/bills/airtime', auth, h(async (req, res) => {
       `INSERT INTO bill_payments(user_id, reference, network, phone, amount) VALUES($1,$2,$3,$4,$5)`,
       [req.uid, reference, network, phone, amount]);
     await post(c, {
-      idem: `bill:${reference}`, kind: 'bill_airtime', userId: req.uid, meta: { amount, network, phone, reference },
-      legs: [{ account: `u:${req.uid}:main`, amount: -amount }, { account: 'sys:external', amount }],
+      idem: `bill:${reference}`, kind: 'bill_airtime', userId: req.uid, meta: { amount, fee, network, phone, reference },
+      legs: [
+        { account: `u:${req.uid}:main`, amount: -total },
+        { account: 'sys:external', amount },
+        { account: 'sys:revenue', amount: fee },
+      ],
     });
   });
 
@@ -583,7 +617,11 @@ app.post('/bills/airtime', auth, h(async (req, res) => {
     await tx(async (c) => {
       await post(c, {
         idem: `billrefund:${reference}`, kind: 'refund', userId: req.uid, meta: { reference },
-        legs: [{ account: `u:${req.uid}:main`, amount }, { account: 'sys:external', amount: -amount }],
+        legs: [
+          { account: `u:${req.uid}:main`, amount: total },
+          { account: 'sys:external', amount: -amount },
+          { account: 'sys:revenue', amount: -fee },
+        ],
       });
       await c.query(`UPDATE bill_payments SET status='failed', error=$2 WHERE reference=$1`, [reference, result.msg || 'failed']);
     });
@@ -694,11 +732,13 @@ if (sandbox) {
 }
 
 mountFeatures(app, { auth, h, q, tx, httpErr, validAmount, checkPin, requireEmailVerified, naira, maskName, notifyUser: notify, settings });
-mountSupport(app, { auth, admin, h, q, httpErr, notifyUser: notify });
+mountSupport(app, { auth, admin: staffOrAdmin, h, q, httpErr, notifyUser: notify, pushStaff: pushToStaff });
+mountPush(app, { auth, h, q, httpErr });
 mountWebAuthn(app, { auth, h, q, httpErr, sign, notifyUser: notify });
 mountTransactions(app, { auth, h, q, httpErr, naira });
 mountBills(app, { auth, h, q, tx, post, httpErr, alert, checkPin, requireEmailVerified, validAmount });
 mountAccount(app, { auth, h, q, tx, httpErr, checkPin });
+mountStaff(app, { auth, h, q, tx, httpErr, notify, naira, isAdminUser, checkPin, enqueue });
 
 app.get('/', (_req, res) => res.json({ ok: true }));
 

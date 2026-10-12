@@ -1,16 +1,23 @@
 import 'dotenv/config';
 import { startWorker, enqueue } from './jobs.js';
 import { releasePending, evaluateUser, unlockBonus } from './bonus.js';
-import { q } from './db.js';
+import { q, tx } from './db.js';
+import { post } from './ledger.js';
+import { runDueBills } from './bills.js';
 import { payout, payoutStatus } from './flutterwave.js';
 import { settlePayout } from './payouts.js';
 import { alert } from './alert.js';
+import { sendMail } from './mail.js';
+import { pushAll } from './push.js';
 
 const ref = (id) => `payout-${id}`;
 
 startWorker({
   evaluate_bonuses: { run: async ({ userId }) => { await evaluateUser(userId); await releasePending(); await unlockBonus(userId); } },
   release_pending: { run: releasePending },
+  push_all: { run: (payload) => pushAll(payload) },
+  run_bill_schedules: { run: () => runDueBills({ q, tx, post, alert, httpErr: (status, msg) => Object.assign(new Error(msg), { status }) }) },
+  send_mail: { run: ({ to, subject, text }) => sendMail(to, subject, text) },
   payout: {
     run: async ({ payoutId }) => {
       const p = (await q('SELECT * FROM payouts WHERE id=$1', [payoutId])).rows[0];
@@ -51,5 +58,6 @@ setInterval(() => {
   enqueue(null, 'release_pending', {}, { dedupe: `release:${min}` });
   enqueue(null, 'payout_check', {}, { dedupe: `pcheck:${Math.floor(now / 300000)}` });
   if (min % 60 === 0) enqueue(null, 'integrity', {}, { dedupe: `integrity:${min}` });
+  enqueue(null, 'run_bill_schedules', {}, { dedupe: `bills:${Math.floor(now / 3600000)}` });
 }, 30000);
 console.log('worker running');

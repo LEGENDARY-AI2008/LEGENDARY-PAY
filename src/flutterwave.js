@@ -6,12 +6,19 @@ import crypto from 'node:crypto';
 const sandbox = () => process.env.SANDBOX === '1';
 const key = () => process.env.FLW_SECRET_KEY || '';
 const live = () => Boolean(key());
-const BASE = 'https://api.flutterwave.com/v3';
+// Calls go straight to Flutterwave, or through our fixed-IP forwarder when FLW_PROXY_URL is set.
+// The forwarder passes the key on, over HTTPS only, and needs PROXY_KEY to accept a call.
+const PROXY = process.env.FLW_PROXY_URL ? process.env.FLW_PROXY_URL.replace(/\/$/, '') : '';
+const BASE = PROXY ? `${PROXY}/v3` : 'https://api.flutterwave.com/v3';
 
 async function call(path, method = 'GET', body) {
   const r = await fetch(BASE + path, {
     method,
-    headers: { authorization: 'Bearer ' + key(), 'content-type': 'application/json' },
+    headers: {
+      authorization: 'Bearer ' + key(),
+      'content-type': 'application/json',
+      ...(PROXY ? { 'x-proxy-key': process.env.PROXY_KEY || '' } : {}),
+    },
     body: body ? JSON.stringify(body) : undefined,
   });
   const j = await r.json().catch(() => ({}));
@@ -54,14 +61,15 @@ const STATIC_BANKS = [
   ['999992', 'OPay'], ['999991', 'PalmPay'], ['50515', 'Moniepoint'], ['50211', 'Kuda'], ['044', 'Access Bank'],
   ['058', 'GTBank'], ['057', 'Zenith Bank'], ['033', 'UBA'], ['011', 'First Bank'], ['070', 'Fidelity Bank'],
   ['214', 'FCMB'], ['232', 'Sterling Bank'], ['035', 'Wema Bank'], ['050', 'Ecobank'], ['032', 'Union Bank'], ['301', 'Jaiz Bank'],
-].map(([code, name]) => ({ code, name }));
+].map(([code, name]) => ({ code, name })).sort((a, b) => a.name.localeCompare(b.name));
 let banksCache = { v: null, exp: 0 };
 
 export async function listBanks() {
   if (!live()) return STATIC_BANKS;
   if (banksCache.v && Date.now() < banksCache.exp) return banksCache.v;
   const r = await call('/banks/NG');
-  const list = r.ok ? (r.data || []).map((b) => ({ code: String(b.code), name: b.name })) : [];
+  // Sorted A to Z, so the bank list in the app is alphabetical.
+  const list = r.ok ? (r.data || []).map((b) => ({ code: String(b.code), name: b.name })).sort((a, b) => a.name.localeCompare(b.name)) : [];
   if (!list.length) return STATIC_BANKS;
   banksCache = { v: list, exp: Date.now() + 24 * 3600 * 1000 };
   return list;
@@ -128,9 +136,14 @@ export async function payBill({ reference, customer, amount, network }) {
   return { status: 'pending', msg: r.msg };
 }
 
-// ---------- data, electricity and cable bills (UNVERIFIED against the live API) ----------
-// The first real call shows whether these paths and fields are right. Check them in the Flutterwave
-// dashboard before going live: the category names, the biller/item codes and the validate response.
+// ---------- data, electricity, cable and other bills ----------
+// Routes follow Flutterwave's Java SDK (flutterwave/java-v3, Bills.java):
+//   GET  /bill-categories?<flag>=1        list providers (flag = data_bundle, power, cable, internet)
+//   GET  /bill-categories?biller_code=X   list plans/items for one provider
+//   GET  /bill-items/{item}/validate?code=&customer=   check the meter or smartcard number
+//   POST /bills                           pay the bill
+// UNVERIFIED on the live account: the field names in the responses and the `type` value sent on payment.
+// Check the first real DStv payment in the dashboard before going live.
 // Sandbox mode (SANDBOX=1, no key) returns fixed test data so the screens can be tested.
 const SANDBOX_BILLERS = {
   DATA: [{ code: 'MTN_DATA', name: 'MTN Data' }, { code: 'GLO_DATA', name: 'Glo Data' }, { code: 'AIRTEL_DATA', name: 'Airtel Data' }, { code: '9MOBILE_DATA', name: '9mobile Data' }],
@@ -144,27 +157,25 @@ const SANDBOX_BILLERS = {
   WASTE: [{ code: 'WASTE_A', name: 'Waste provider A' }],
   SCHOOL: [{ code: 'SCHOOL_A', name: 'School fees provider A' }],
 };
-const CATEGORY_CODE = {
-  DATA: 'DATA_BUNDLE', ELECTRICITY: 'ELECTRICITY_BILL', CABLE: 'CABLE_TV',
-  EXAM: 'EXAM_PIN', INTERNET: 'INTERNET_SERVICE', BETTING: 'BETTING_WALLET',
-  WATER: 'WATER_BILL', INSURANCE: 'INSURANCE_PREMIUM', WASTE: 'WASTE_BILL', SCHOOL: 'SCHOOL_FEES',
-};
 
-// Live biller codes, from Flutterwave's documentation. The live billers list has no category field,
-// so we keep a fixed list here. Add a code only after you confirm it from the dashboard or a real call.
-const LIVE_BILLERS = {
-  CABLE: [
-    { code: 'BIL119', name: 'DStv' }, { code: 'BIL120', name: 'GOtv' },
-    { code: 'BIL128', name: 'MyTV' }, { code: 'BIL129', name: 'HiTV' },
-  ],
-};
+// Query flag that the SDK's getCategories() sends for each service. Services without a flag return no providers.
+const CATEGORY_FLAG = { DATA: 'data_bundle', ELECTRICITY: 'power', CABLE: 'cable', INTERNET: 'internet' };
 
 export async function listBillers(category) {
   if (!live()) {
     if (!sandbox()) throw new Error('Flutterwave key is missing');
     return SANDBOX_BILLERS[category] || [];
   }
-  return LIVE_BILLERS[category] || [];
+  const flag = CATEGORY_FLAG[category];
+  if (!flag) return [];
+  const r = await call(`/bill-categories?${flag}=1`);
+  if (!r.ok) throw new Error(r.msg || 'Could not load providers');
+  // The response lists one row per plan, so keep one row per provider.
+  const seen = new Map();
+  for (const b of r.data || []) {
+    if (!seen.has(b.biller_code)) seen.set(b.biller_code, { code: b.biller_code, name: b.biller_name || b.name || b.biller_code });
+  }
+  return [...seen.values()];
 }
 
 // Items are plans (data bundles, cable packages) or meter types for electricity.
@@ -180,10 +191,12 @@ export async function listBillerItems(billerCode, category) {
     if (category === 'BETTING') return [{ code: `${billerCode}-FUND`, name: 'Wallet funding', amountKobo: 0 }];
     return [{ code: `${billerCode}-BASIC`, name: 'Basic', amountKobo: 1_850_000 }, { code: `${billerCode}-FULL`, name: 'Full', amountKobo: 2_500_000 }];
   }
-  const r = await call(`/billers/${encodeURIComponent(billerCode)}/items`);
+  const r = await call(`/bill-categories?biller_code=${encodeURIComponent(billerCode)}`);
   if (!r.ok) throw new Error(r.msg || 'Could not load plans');
   return (r.data || []).map((i) => ({
-    code: i.item_code, name: i.name, amountKobo: Math.round(Number(i.amount || 0) * 100),
+    code: i.item_code,
+    name: i.name || i.item_name || i.item_code,
+    amountKobo: Math.round(Number(i.amount || 0) * 100),
   }));
 }
 
@@ -193,7 +206,7 @@ export async function validateBillCustomer({ billerCode, itemCode, customer }) {
     if (!sandbox()) throw new Error('Flutterwave key is missing');
     return { name: 'Test Customer' };
   }
-  const r = await call(`/bill-items/${encodeURIComponent(itemCode)}/validate?customer=${encodeURIComponent(customer)}`);
+  const r = await call(`/bill-items/${encodeURIComponent(itemCode)}/validate?code=${encodeURIComponent(billerCode)}&customer=${encodeURIComponent(customer)}`);
   if (!r.ok) throw new Error(r.msg || 'Could not check this number');
   return { name: r.data?.name || r.data?.customer_name || 'Customer found' };
 }
@@ -205,8 +218,9 @@ export async function payBillItem({ reference, category, billerCode, itemCode, c
     console.log(`[sandbox bill] ${reference} ${category} ${billerCode}/${itemCode} ${amountKobo} to ${customer}`);
     return { status: 'success' };
   }
-  const r = await call(`/billers/${encodeURIComponent(billerCode)}/items/${encodeURIComponent(itemCode)}/payment`, 'POST', {
-    country: 'NG', customer_id: customer, amount: amountKobo / 100, reference,
+  const r = await call('/bills', 'POST', {
+    country: 'NG', customer, amount: amountKobo / 100, recurrence: 'ONCE',
+    type: itemCode, biller_name: billerCode, reference,
   });
   if (r.http >= 500 || !r.data && !r.ok) return { status: 'pending', msg: r.msg };
   if (!r.ok) return { status: 'failed', msg: r.msg };
