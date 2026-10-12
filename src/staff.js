@@ -11,6 +11,9 @@ const DAILY_MAX = Number(process.env.STAFF_DAILY_MAX_KOBO || 10000000);   // ₦
 // Only wallet-to-wallet moves and bonus-type credits can be reversed here.
 // Money that left the app (bank transfers, deposits, delivered bills) cannot be pulled back by a ledger entry.
 const REVERSIBLE = ['internal_transfer', 'cashback', 'bonus', 'referral'];
+// Bills (airtime, data, etc.) can be reversed too, for wrong or failed payments. Only the customer's side is
+// returned. The cost of the bill is moved to sys:adjust, so the books show it as an adjustment.
+const isBill = (kind) => String(kind || '').startsWith('bill_');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -109,14 +112,18 @@ export function mountStaff(app, d) {
     const j = (await q(
       `SELECT id, idem_key, kind, user_id FROM journal WHERE idem_key=$1 OR id::text=$1 LIMIT 1`, [ref])).rows[0];
     if (!j) throw httpErr(404, 'Transaction not found');
-    if (!REVERSIBLE.includes(j.kind)) throw httpErr(400, 'This type of transaction cannot be reversed here. Ask an admin.');
+    if (!REVERSIBLE.includes(j.kind) && !isBill(j.kind)) throw httpErr(400, 'This type of transaction cannot be reversed here. Ask an admin.');
     const done = (await q(`SELECT 1 FROM journal WHERE kind='reversal' AND meta->>'of'=$1 LIMIT 1`, [String(j.id)])).rows[0];
     if (done) throw httpErr(409, 'This transaction has already been reversed');
 
     // The amount that moved to or from user wallets. Used for the limit.
-    const moved = Number((await q(
-      `SELECT COALESCE(SUM(e.amount),0) AS t FROM entries e JOIN accounts a ON a.id = e.account_id
-        WHERE e.journal_id=$1 AND a.code LIKE 'u:%' AND e.amount > 0`, [j.id])).rows[0].t);
+    const moved = isBill(j.kind)
+      ? -Number((await q(
+          `SELECT COALESCE(SUM(e.amount),0) AS t FROM entries e JOIN accounts a ON a.id = e.account_id
+            WHERE e.journal_id=$1 AND a.code LIKE 'u:%' AND e.amount < 0`, [j.id])).rows[0].t)
+      : Number((await q(
+          `SELECT COALESCE(SUM(e.amount),0) AS t FROM entries e JOIN accounts a ON a.id = e.account_id
+            WHERE e.journal_id=$1 AND a.code LIKE 'u:%' AND e.amount > 0`, [j.id])).rows[0].t);
     if (!req.staff.admin) {
       if (moved > ADJUST_MAX) throw httpErr(403, `Support can reverse up to ₦${(ADJUST_MAX / 100).toLocaleString('en-NG')}. Ask an admin.`);
       if ((await todayKobo(req.staff.id)) + moved > DAILY_MAX) throw httpErr(403, 'You have reached your daily limit.');
@@ -124,7 +131,12 @@ export function mountStaff(app, d) {
 
     const entries = (await q(
       `SELECT a.code, e.amount FROM entries e JOIN accounts a ON a.id = e.account_id WHERE e.journal_id=$1`, [j.id])).rows;
-    const legs = entries.map((e) => ({ account: e.code, amount: -Number(e.amount) }));
+    let legs = entries.map((e) => ({ account: e.code, amount: -Number(e.amount) }));
+    if (isBill(j.kind)) {
+      const userLegs = entries.filter((e) => e.code.startsWith('u:')).map((e) => ({ account: e.code, amount: -Number(e.amount) }));
+      const net = userLegs.reduce((sum, l) => sum + l.amount, 0);
+      legs = [...userLegs, { account: 'sys:adjust', amount: -net }];
+    }
     try {
       await tx(async (c) => {
         const r = await post(c, {

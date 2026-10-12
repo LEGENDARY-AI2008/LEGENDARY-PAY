@@ -241,6 +241,7 @@ CREATE TABLE IF NOT EXISTS support_messages (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS support_messages_thread ON support_messages(thread_id, id);
+ALTER TABLE support_messages ADD COLUMN IF NOT EXISTS image text;
 
 -- Fingerprint (passkeys): only public keys are stored, never fingerprint data
 CREATE TABLE IF NOT EXISTS webauthn_credentials (

@@ -15,12 +15,12 @@ Rules:
 - Never reveal which AI model, company or service powers you. If asked, say you are Lega, the Legendary Pay assistant.
 - You can only explain. You cannot make, approve, cancel or change any payment, transfer, balance or setting.
 - Never ask for a PIN, password, OTP, card number or fingerprint. Never ask the user to share these with anyone.
-- The DATA section holds this customer's balance and their last few transactions. Use it to explain, and never invent figures. If a transaction is not in DATA, say you cannot see it and suggest History or Live chat.
+- The DATA section holds this customer's balance and their last few transactions. Use it to explain, and never invent figures. If a transaction is not in DATA, say you cannot see it and suggest History or our team.
 - Amounts are in naira. A negative amount is money out, a positive amount is money in.
 - Only explain. You cannot make, approve, cancel or change any payment, transfer, balance or setting.
 - Never reveal data about any other person.
 - Never promise a refund, reversal or money back. Those need a person to check.
-- For a failed payment, a wrong transfer, a locked account or any complaint about money, tell the user to use Live chat with support.
+- For a failed payment, a wrong transfer, a locked account or any complaint about money, tell the user to talk to our team.
 - If you are not sure, or the user asks for a person, end your reply with the exact text ${HANDOFF} on its own line.`;
 
 async function customerContext(q, uid) {
@@ -54,8 +54,8 @@ function allowed(uid) {
 export function mountAI(app, { auth, h, q }) {
   app.post('/ai/chat', auth, h(async (req, res) => {
     const key = process.env.OPENROUTER_API_KEY || '';
-    if (!key) return res.status(503).json({ error: 'AI support is not set up yet. Please use Live chat.' });
-    if (!allowed(req.uid)) return res.status(429).json({ error: 'You have asked many questions this hour. Please use Live chat or try again later.' });
+    if (!key) return res.status(503).json({ error: 'AI support is not set up yet. Please try again later.' });
+    if (!allowed(req.uid)) return res.status(429).json({ error: 'You have asked many questions this hour. Please try again later or talk to our team.' });
 
     const input = Array.isArray(req.body?.messages) ? req.body.messages : [];
     const messages = input.slice(-12)
@@ -86,11 +86,11 @@ export function mountAI(app, { auth, h, q }) {
         signal: AbortSignal.timeout(25000),
       });
     } catch (e) {
-      return res.status(503).json({ error: 'The assistant is busy right now. Please use Live chat.' });
+      return res.status(503).json({ error: 'The assistant is busy right now. Please try again later.' });
     }
     const j = await r.json().catch(() => ({}));
     const text = j?.choices?.[0]?.message?.content;
-    if (!r.ok || !text) return res.status(503).json({ error: 'The assistant is busy right now. Please use Live chat.' });
+    if (!r.ok || !text) return res.status(503).json({ error: 'The assistant is busy right now. Please try again later.' });
 
     const handoff = text.includes(HANDOFF);
     const reply = text.replaceAll(HANDOFF, '').trim() || 'Let me connect you to a person.';
