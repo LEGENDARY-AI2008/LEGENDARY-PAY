@@ -229,3 +229,22 @@ export async function payBillItem({ reference, category, billerCode, itemCode, c
   if (s === 'failed') return { status: 'failed', msg: r.msg };
   return { status: 'pending', msg: r.msg };
 }
+
+// Admin diagnostic: shows what Flutterwave returns for the provider lists (field names and category names).
+// It never returns the key. Only provider rows come back.
+export async function billDebug() {
+  if (!live()) return { note: 'Live key is not set on this server' };
+  const out = {};
+  for (const path of ['/bill-categories', '/bill-categories?data_bundle=1', '/bill-categories?power=1']) {
+    const r = await call(path);
+    const rows = Array.isArray(r.data) ? r.data : [];
+    const fields = new Set();
+    rows.forEach((x) => Object.keys(x || {}).forEach((k) => fields.add(k)));
+    const categoryNames = new Set(rows.map((x) => x.category_name).filter(Boolean));
+    out[path] = {
+      ok: Boolean(r.ok), message: r.msg || null, count: rows.length,
+      fields: [...fields], categoryNames: [...categoryNames].slice(0, 80), sample: rows.slice(0, 3),
+    };
+  }
+  return out;
+}

@@ -11,7 +11,7 @@ import { post, INSUFFICIENT } from './ledger.js';
 import { enqueue } from './jobs.js';
 import { queueGrant } from './bonus.js';
 import { settlePayout } from './payouts.js';
-import { createReservedAccount, listBanks, resolveBankAccount, verifyWebhook, payBill } from './flutterwave.js';
+import { createReservedAccount, listBanks, resolveBankAccount, verifyWebhook, payBill, billDebug } from './flutterwave.js';
 import { sendMail } from './mail.js';
 import { alert } from './alert.js';
 import { mountFeatures, applyRoundUp } from './features.js';
@@ -684,6 +684,10 @@ app.get('/admin/payouts', admin, h(async (_req, res) => {
     id: p.id, userId: p.user_id, amountKobo: Number(p.amount), feeKobo: Number(p.fee),
     bankCode: p.bank_code, accountNumber: p.account_number, status: p.status, at: p.created_at,
   })));
+}));
+
+app.get('/admin/bill-debug', admin, h(async (_req, res) => {
+  res.json(await billDebug());
 }));
 
 app.get('/admin/bills', admin, h(async (_req, res) => {
