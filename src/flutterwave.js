@@ -163,7 +163,7 @@ const CATEGORY_FLAG = { DATA: 'data_bundle', ELECTRICITY: 'power', CABLE: 'cable
 
 // Services with no flag: Flutterwave's flag-less list is searched by provider name instead.
 const KEYWORDS = {
-  EXAM: /WAEC|NECO|JAMB|NABTEB|EXAM|RESULT CHECK/i,
+  EXAM: /WAEC|NECO|JAMB|NABTEB|EXAM|RESULT CHECK|ENTRANCE/i,
   BETTING: /BET9JA|BETKING|1XBET|BETWAY|NAIRABET|SPORTYBET|MERRYBET|BETBIGA|BETLION|BETTING|SPORT/i,
   WATER: /WATER/i,
   INSURANCE: /INSUR|AIICO|LEADWAY|AXA|SUNU|HYGEIA/i,
@@ -171,8 +171,20 @@ const KEYWORDS = {
   SCHOOL: /SCHOOL|TUITION|UNIVERSITY|POLYTECHNIC|COLLEGE|ACADEMY/i,
 };
 
+// Named providers inside each keyword service. A plan goes under the first name it matches.
+const BRANDS = {
+  EXAM: [['WAEC', /WAEC/i], ['NECO', /NECO/i], ['JAMB', /JAMB/i], ['NABTEB', /NABTEB/i], ['Common Entrance', /ENTRANCE/i]],
+  BETTING: [['Bet9ja', /BET9JA/i], ['SportyBet', /SPORTY/i], ['BetKing', /BETKING/i], ['1xBet', /1X ?BET/i], ['Betway', /BETWAY/i], ['NairaBet', /NAIRABET/i], ['MerryBet', /MERRYBET/i], ['BetBiga', /BETBIGA/i], ['BetLion', /BETLION/i]],
+  WATER: [['Water', /WATER/i]],
+  INSURANCE: [['AIICO', /AIICO/i], ['Leadway', /LEADWAY/i], ['AXA Mansard', /AXA/i], ['Insurance', /INSUR/i]],
+  WASTE: [['Waste', /WASTE|RUBBISH|SANITAT/i]],
+  SCHOOL: [['School fees', /SCHOOL|TUITION/i], ['University', /UNIVERSITY|POLYTECHNIC|COLLEGE|ACADEMY/i]],
+};
+
 // Data bundles are grouped by provider code, and the network name is found in the plan names.
 const NETWORK_WORDS = [['MTN', /\bMTN\b/i], ['Glo', /\bGLO\b/i], ['Airtel', /AIRTEL/i], ['9mobile', /9\s?MOBILE|ETISALAT/i]];
+
+const textOf = (b) => `${b.name || ''} ${b.biller_name || ''} ${b.short_name || ''}`;
 
 let allRowsCache = { v: null, exp: 0 };
 async function allBillRows() {
@@ -195,28 +207,31 @@ export async function listBillers(category) {
     rows = r.data || [];
   } else if (KEYWORDS[category]) {
     const re = KEYWORDS[category];
-    rows = (await allBillRows()).filter((b) => re.test(`${b.name || ''} ${b.biller_name || ''} ${b.short_name || ''}`));
+    rows = (await allBillRows()).filter((b) => re.test(textOf(b)));
   } else {
     return [];
   }
-  // The response lists one row per plan, so group the rows by provider code.
   const groups = new Map();
   for (const b of rows) {
-    const g = groups.get(b.biller_code) || { code: b.biller_code, texts: [], first: b };
-    g.texts.push(`${b.name || ''} ${b.biller_name || ''} ${b.short_name || ''}`);
-    groups.set(b.biller_code, g);
-  }
-  return [...groups.values()].map((g) => {
+    const text = textOf(b);
+    let key, name;
     if (category === 'DATA') {
-      const hit = NETWORK_WORDS.find(([, re]) => g.texts.some((t) => re.test(t)));
-      return { code: g.code, name: hit ? hit[0] : `Other network (${g.code})` };
+      // One row per plan: keep one row per provider code, named by its network.
+      const net = NETWORK_WORDS.find(([, re]) => re.test(text));
+      key = b.biller_code;
+      name = net ? net[0] : `Other network (${b.biller_code})`;
+    } else if (KEYWORDS[category]) {
+      // Group by named provider, so each provider gets its own row.
+      const brand = (BRANDS[category] || []).find(([, re]) => re.test(text));
+      name = brand ? brand[0] : String(b.biller_name || b.name || b.biller_code).slice(0, 40);
+      key = name;
+    } else {
+      key = b.biller_code;
+      name = b.biller_name || b.name || b.biller_code;
     }
-    if (KEYWORDS[category]) {
-      const label = String(g.first.biller_name || g.first.name || g.code).slice(0, 40);
-      return { code: g.code, name: label };
-    }
-    return { code: g.code, name: g.first.biller_name || g.first.name || g.code };
-  });
+    if (!groups.has(key)) groups.set(key, { code: b.biller_code, name });
+  }
+  return [...groups.values()];
 }
 
 // Items are plans (data bundles, cable packages) or meter types for electricity.

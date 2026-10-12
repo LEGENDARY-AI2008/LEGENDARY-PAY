@@ -22,6 +22,7 @@ import { mountBills, billFeeKobo } from './bills.js';
 import { mountAccount } from './account.js';
 import { mountStaff } from './staff.js';
 import { pushUsers, pushToStaff, mountPush } from './push.js';
+import { mountAI } from './ai.js';
 
 const sandbox = process.env.SANDBOX === '1';
 const required = ['DATABASE_URL', 'JWT_SECRET',
@@ -142,10 +143,20 @@ async function checkLimit(uid, verified, amount) {
 }
 
 // ---------- auth ----------
+// Nigerian numbers are stored as 0XXXXXXXXXX. Numbers from abroad keep their country code, like +447911123456.
+function cleanPhone(raw) {
+  let p = String(raw || '').replace(/[\s\-()]/g, '');
+  if (/^\+234\d{10}$/.test(p)) p = '0' + p.slice(4);
+  if (/^0\d{10}$/.test(p)) return p;
+  if (/^\+[1-9]\d{7,14}$/.test(p)) return p;
+  return null;
+}
+
 app.post('/auth/signup', h(async (req, res) => {
-  const { phone, pin, referralCode, deviceId } = req.body || {};
+  const { pin, referralCode, deviceId } = req.body || {};
+  const phone = cleanPhone(req.body?.phone);
   const email = String(req.body?.email || '').trim().toLowerCase();
-  if (!/^0\d{10}$/.test(phone || '') || !/^\d{4}$/.test(pin || '')) throw httpErr(400, 'Invalid phone or PIN');
+  if (!phone || !/^\d{4}$/.test(pin || '')) throw httpErr(400, 'Enter a valid phone number with country code, and a 4-digit PIN');
   if (!validEmail(email)) throw httpErr(400, 'Enter a valid email address');
   try {
     const user = await tx(async (c) => {
@@ -155,7 +166,7 @@ app.post('/auth/signup', h(async (req, res) => {
       const u = (await c.query(
         `INSERT INTO users(phone, email, pin_hash, referral_code, referred_by, device_id, account_number)
          VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id, referral_code, account_number`,
-        [phone, email, await bcrypt.hash(pin, 10), code, referrer?.id || null, deviceId || null, phone.slice(1)]
+        [phone, email, await bcrypt.hash(pin, 10), code, referrer?.id || null, deviceId || null, phone.startsWith('0') ? phone.slice(1) : String(crypto.randomInt(1, 7)) + String(crypto.randomInt(0, 1e9)).padStart(9, '0')]
       )).rows[0];
       await c.query(`INSERT INTO accounts(code, user_id, kind) VALUES($1,$2,'main'), ($3,$2,'bonus')`,
         [`u:${u.id}:main`, u.id, `u:${u.id}:bonus`]);
@@ -739,6 +750,7 @@ if (sandbox) {
 mountFeatures(app, { auth, h, q, tx, httpErr, validAmount, checkPin, requireEmailVerified, naira, maskName, notifyUser: notify, settings });
 mountSupport(app, { auth, admin: staffOrAdmin, h, q, httpErr, notifyUser: notify, pushStaff: pushToStaff });
 mountPush(app, { auth, h, q, httpErr });
+mountAI(app, { auth, h, q });
 mountWebAuthn(app, { auth, h, q, httpErr, sign, notifyUser: notify });
 mountTransactions(app, { auth, h, q, httpErr, naira });
 mountBills(app, { auth, h, q, tx, post, httpErr, alert, checkPin, requireEmailVerified, validAmount });
