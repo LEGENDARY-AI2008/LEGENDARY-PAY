@@ -116,7 +116,7 @@ async function checkPin(userId, pin, approval) {
   if (approval) return verifyApproval({ q, httpErr, uid: userId, approval });
   const u =(await q('SELECT pin_hash, pin_fails, locked_until FROM users WHERE id=$1', [userId])).rows[0];
   if (!u) throw httpErr(401, 'Unauthorized');
-  if (u.locked_until && u.locked_until > new Date()) throw httpErr(423, 'PIN locked, try again later');
+  if (u.locked_until && u.locked_until > new Date()) throw httpErr(423, 'Your PIN is locked for 30 minutes. Wait, or tap Forgot PIN to reset it with the code sent to your email, or contact support.');
   if (await bcrypt.compare(String(pin || ''), u.pin_hash)) {
     if (u.pin_fails) await q('UPDATE users SET pin_fails=0 WHERE id=$1', [userId]);
     return;

@@ -170,7 +170,11 @@ export async function payBill({ reference, customer, amount, network }) {
     return { status: 'success' };
   }
   const item = await airtimeItemFor(network);
-  if (!item) return { status: 'failed', msg: `No airtime item found for ${network}` };
+  if (!item) {
+    const rows = await airtimeRows();
+    console.log(`[airtime] ${reference} network=${network} NO ITEM FOUND. airtime rows from Flutterwave=${rows.length}`);
+    return { status: 'failed', msg: `No airtime item found for ${network}` };
+  }
   const r = await call('/bills', 'POST', {
     country: 'NG', customer, amount: Number(amount) / 100, recurrence: 'ONCE',
     type: item.itemCode, biller_name: item.billerCode, reference,
@@ -338,7 +342,7 @@ export async function payBillItem({ reference, category, billerCode, itemCode, c
 export async function billDebug() {
   if (!live()) return { note: 'Live key is not set on this server' };
   const out = {};
-  for (const path of ['/bill-categories', '/bill-categories?data_bundle=1', '/bill-categories?power=1']) {
+  for (const path of ['/bill-categories', '/bill-categories?data_bundle=1', '/bill-categories?power=1', '/bill-categories?airtime=1']) {
     const r = await call(path);
     const rows = Array.isArray(r.data) ? r.data : [];
     const fields = new Set();
@@ -349,5 +353,15 @@ export async function billDebug() {
       fields: [...fields], categoryNames: [...categoryNames].slice(0, 80), sample: rows.slice(0, 3),
     };
   }
+  // The airtime rows the payment code uses, and which one it picks for each network.
+  const air = (await airtimeRows()).map((x) => ({
+    name: x.name, biller_name: x.biller_name, biller_code: x.biller_code, item_code: x.item_code,
+    is_airtime: x.is_airtime, amount: x.amount,
+  }));
+  out.airtimeUsed = air.slice(0, 60);
+  out.airtimePicked = Object.fromEntries(Object.keys(AIRTIME_WORDS).map((n) => {
+    const hit = air.find((x) => AIRTIME_WORDS[n].test(`${x.name || ''} ${x.biller_name || ''}`));
+    return [n, hit ? { biller_code: hit.biller_code, item_code: hit.item_code } : null];
+  }));
   return out;
 }

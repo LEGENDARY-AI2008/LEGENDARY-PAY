@@ -100,6 +100,25 @@ export function mountStaff(app, d) {
     res.json({ ok: true, kobo });
   }));
 
+  // Clears a locked PIN after support has checked who the person is. Needs the staff member's own PIN or fingerprint.
+  app.post('/staff/unlock-pin', staffOnly, h(async (req, res) => {
+    const { userId, reason, pin, approval } = req.body || {};
+    const why = String(reason || '').trim();
+    if (!UUID_RE.test(String(userId || ''))) throw httpErr(400, 'Pick a user first');
+    if (why.length < 5) throw httpErr(400, 'Write the reason (at least 5 letters)');
+    await checkPin(req.uid, pin, approval);
+    const target = (await q('SELECT id FROM users WHERE id=$1 AND deleted_at IS NULL', [userId])).rows[0];
+    if (!target) throw httpErr(404, 'User not found');
+    await tx(async (c) => {
+      await c.query('UPDATE users SET pin_fails = 0, locked_until = NULL WHERE id = $1', [userId]);
+      await c.query(
+        `INSERT INTO staff_audit(staff_id, action, target_user_id, amount_kobo, reason, ref) VALUES($1,'unlock_pin',$2,0,$3,NULL)`,
+        [req.staff.id, userId, why]);
+    });
+    notify(userId, 'Your PIN is unlocked', 'Our support team unlocked your PIN. You can sign in now.');
+    res.json({ ok: true });
+  }));
+
   // Reverses a wallet-to-wallet transfer or a bonus credit, by posting the opposite entries.
   // The original stays in the history, and a reversal entry links to it.
   app.post('/staff/reverse', staffOnly, h(async (req, res) => {
