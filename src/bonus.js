@@ -25,6 +25,9 @@ export async function evaluateUser(userId) {
     if (!u.referred_by) return;
     const r = (await c.query('SELECT id, device_id FROM users WHERE id=$1', [u.referred_by])).rows[0];
     if (!r || r.id === u.id) return;
+    // Same BVN/NIN as the referrer (one person with two of their own accounts) = no referral reward.
+    const sameId = (await c.query('SELECT kyc_hash FROM users WHERE id=$1', [r.id])).rows[0];
+    if (u.kyc_hash && sameId && sameId.kyc_hash === u.kyc_hash) return;
     // No device ID, or the same device as the referrer = self-referral. Block it.
     if (!u.device_id || r.device_id === u.device_id) return;
     // One referral reward per device: if a referee on this device already earned one, stop.

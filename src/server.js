@@ -43,7 +43,8 @@ app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf; } }));
 app.use('/lookup', rateLimit({ windowMs: 15 * 60 * 1000, limit: 80, standardHeaders: true, legacyHeaders: false }));
 app.use(['/auth', '/kyc'], rateLimit({ windowMs: 15 * 60 * 1000, limit: 40, standardHeaders: true, legacyHeaders: false }));
 
-const maskName = (n) => (n ? n.split(' ').map((w, i) => (i === 0 ? w : w[0] + '***')).join(' ') : 'Wallet user');
+const ID_WALLET_LIMIT = 3; // wallets one BVN or NIN can open
+const maskName =(n) => (n ? n.split(' ').map((w, i) => (i === 0 ? w : w[0] + '***')).join(' ') : 'Wallet user');
 const httpErr = (status, msg) => Object.assign(new Error(msg), { status });
 const h = (fn) => (req, res, next) => fn(req, res).catch(next);
 const safeEq = (a, b) => { const x = Buffer.from(String(a)), y = Buffer.from(String(b)); return x.length === y.length && crypto.timingSafeEqual(x, y); };
@@ -255,9 +256,10 @@ app.post('/kyc/verify', auth, h(async (req, res) => {
   if (!/^\d{11}$/.test(idNumber)) throw httpErr(400, `${idType.toUpperCase()} must be 11 digits`);
   const u = (await q('SELECT id, email, phone, kyc_verified FROM users WHERE id=$1', [req.uid])).rows[0];
   if (u.kyc_verified) throw httpErr(409, 'Already verified');
-  // We keep only a keyed fingerprint (never the number) so one ID cannot open many wallets and farm bonuses.
+  // We keep only a keyed fingerprint (never the number). One BVN/NIN can open up to 3 wallets, counting deleted ones too.
   const fingerprint = crypto.createHmac('sha256', process.env.JWT_SECRET).update(`${idType}:${idNumber}`).digest('hex');
-  if ((await q('SELECT 1 FROM users WHERE kyc_hash=$1', [fingerprint])).rowCount) throw httpErr(409, 'This ID is already linked to another wallet');
+  const used = Number((await q('SELECT COUNT(*) AS n FROM users WHERE kyc_hash=$1', [fingerprint])).rows[0].n);
+  if (used >= ID_WALLET_LIMIT) throw httpErr(409, `This ID is already linked to ${ID_WALLET_LIMIT} wallets, which is the limit`);
   const acc = await createReservedAccount({
     userId: u.id, email: u.email, fullName, phone: u.phone,
     bvn: idType === 'bvn' ? idNumber : undefined,
@@ -267,7 +269,7 @@ app.post('/kyc/verify', auth, h(async (req, res) => {
     await q(`UPDATE users SET full_name=$2, kyc_hash=$3, kyc_verified=true, virtual_account=$4, virtual_bank=$5 WHERE id=$1`,
       [u.id, fullName, fingerprint, acc.accountNumber, acc.bankName]);
   } catch (e) {
-    if (e.code === '23505') throw httpErr(409, 'This ID is already linked to another wallet');
+    if (e.code === '23505') throw httpErr(409, 'This ID is already linked to a wallet');
     throw e;
   }
   await enqueue(null, 'evaluate_bonuses', { userId: u.id });

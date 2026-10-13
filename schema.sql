@@ -316,3 +316,7 @@ INSERT INTO settings(key, value) VALUES ('bill_cashback_bps', 200) ON CONFLICT (
 -- keyed fingerprint of saved account numbers (duplicate checks without storing the number in clear)
 ALTER TABLE beneficiaries ADD COLUMN IF NOT EXISTS account_hash text;
 CREATE INDEX IF NOT EXISTS beneficiaries_hash ON beneficiaries(user_id, type, account_hash, bank_code);
+
+-- one BVN/NIN may now open up to 3 wallets (checked in code), so the fingerprint is no longer unique
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_kyc_hash_key;
+CREATE INDEX IF NOT EXISTS users_kyc_hash ON users(kyc_hash);

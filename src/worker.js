@@ -45,6 +45,13 @@ startWorker({
       }
     },
   },
+  // Support pictures are removed 7 days after they were sent. Messages are deleted 12 months after they were sent.
+  clean_support_pictures: {
+    run: async () => {
+      await q(`UPDATE support_messages SET image = NULL WHERE image IS NOT NULL AND created_at < now() - interval '7 days'`);
+      await q(`DELETE FROM support_messages WHERE created_at < now() - interval '12 months'`);
+    },
+  },
   integrity: {
     run: async () => {
       const r = await q('SELECT COALESCE(SUM(balance),0) AS t FROM accounts');
@@ -59,6 +66,7 @@ setInterval(() => {
   enqueue(null, 'release_pending', {}, { dedupe: `release:${min}` });
   enqueue(null, 'payout_check', {}, { dedupe: `pcheck:${Math.floor(now / 300000)}` });
   if (min % 60 === 0) enqueue(null, 'integrity', {}, { dedupe: `integrity:${min}` });
+  if (min % 60 === 0) enqueue(null, 'clean_support_pictures', {}, { dedupe: `pictures:${min}` });
   enqueue(null, 'run_bill_schedules', {}, { dedupe: `bills:${Math.floor(now / 3600000)}` });
 }, 30000);
 console.log('worker running');
