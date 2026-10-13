@@ -175,7 +175,10 @@ export async function payBill({ reference, customer, amount, network }) {
     country: 'NG', customer, amount: Number(amount) / 100, recurrence: 'ONCE',
     type: item.itemCode, biller_name: item.billerCode, reference,
   });
-  if (r.http >= 500 || (!r.data && !r.ok)) return verifyBill(reference, r.msg);
+  console.log(`[airtime] ${reference} network=${network} item=${item.itemCode} biller=${item.billerCode} http=${r.http} ok=${r.ok} status=${r.data?.status ?? '-'} msg=${r.msg}`);
+  // Server error or no answer: we cannot tell, so check Flutterwave before deciding.
+  if (r.http >= 500) return verifyBill(reference, r.msg);
+  // Flutterwave refused the request (bad network item, wrong key, validation): it was never sent, so refund.
   if (!r.ok) return { status: 'failed', msg: r.msg };
   return finalStatus(r.data?.status, reference, r.msg);
 }
