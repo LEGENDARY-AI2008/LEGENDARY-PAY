@@ -198,9 +198,10 @@ export async function payBill({ reference, customer, amount, network }) {
   console.log(`[airtime] ${reference} network=${network} item=${item.itemCode} biller=${item.billerCode} http=${r.http} ok=${r.ok} status=${r.data?.status ?? '-'} msg=${r.msg}`);
   // Server error or no answer: we cannot tell, so check Flutterwave before deciding.
   if (r.http >= 500) return verifyBill(reference, r.msg);
-  // Flutterwave refused the request (bad network item, wrong key, validation): it was never sent, so refund.
-  if (!r.ok) return { status: 'failed', msg: r.msg };
-  return finalStatus(r.data?.status, reference, r.msg);
+  // Flutterwave accepted the request (2xx), even if it says "Pending": check the final result, never refund on that.
+  if (r.http >= 200 && r.http < 300) return finalStatus(r.data?.status, reference, r.msg);
+  // Flutterwave refused the request (bad item, wrong key, validation): it was never sent, so refund.
+  return { status: 'failed', msg: r.msg };
 }
 
 // ---------- data, electricity, cable and other bills ----------
