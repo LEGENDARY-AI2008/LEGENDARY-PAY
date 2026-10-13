@@ -191,9 +191,9 @@ export async function payBill({ reference, customer, amount, network }) {
     console.log(`[airtime] ${reference} network=${network} NO ITEM FOUND. airtime rows from Flutterwave=${rows.length}`);
     return { status: 'failed', msg: `No airtime item found for ${network}` };
   }
-  const r = await call('/bills', 'POST', {
-    country: 'NG', customer, amount: Number(amount) / 100, recurrence: 'ONCE',
-    type: item.itemCode, biller_name: item.billerCode, reference,
+  // Flutterwave's bill payment: POST /billers/{biller_code}/items/{item_code}/payment (no separate validation for airtime).
+  const r = await call(`/billers/${encodeURIComponent(item.billerCode)}/items/${encodeURIComponent(item.itemCode)}/payment`, 'POST', {
+    country: 'NG', customer_id: String(customer), amount: Number(amount) / 100, reference,
   });
   console.log(`[airtime] ${reference} network=${network} item=${item.itemCode} biller=${item.billerCode} http=${r.http} ok=${r.ok} status=${r.data?.status ?? '-'} msg=${r.msg}`);
   // Server error or no answer: we cannot tell, so check Flutterwave before deciding.
@@ -341,9 +341,8 @@ export async function payBillItem({ reference, category, billerCode, itemCode, c
     console.log(`[sandbox bill] ${reference} ${category} ${billerCode}/${itemCode} ${amountKobo} to ...${String(customer).slice(-4)}`);
     return { status: 'success' };
   }
-  const r = await call('/bills', 'POST', {
-    country: 'NG', customer, amount: amountKobo / 100, recurrence: 'ONCE',
-    type: itemCode, biller_name: billerCode, reference,
+  const r = await call(`/billers/${encodeURIComponent(billerCode)}/items/${encodeURIComponent(itemCode)}/payment`, 'POST', {
+    country: 'NG', customer_id: String(customer), amount: amountKobo / 100, reference,
   });
   if (r.http >= 500 || !r.data && !r.ok) return { status: 'pending', msg: r.msg };
   if (!r.ok) return { status: 'failed', msg: r.msg };
