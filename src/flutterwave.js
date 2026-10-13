@@ -21,8 +21,14 @@ async function call(path, method = 'GET', body) {
     },
     body: body ? JSON.stringify(body) : undefined,
   });
-  const j = await r.json().catch(() => ({}));
-  return { http: r.status, ok: j.status === 'success', msg: j.message || `HTTP ${r.status}`, data: j.data };
+  // Read the raw reply, so a non-JSON error (proxy or firewall page) is still visible in the diagnostic.
+  const text = await r.text().catch(() => '');
+  let j = {};
+  try { j = JSON.parse(text); } catch (e) { /* not JSON */ }
+  return {
+    http: r.status, ok: j.status === 'success', msg: j.message || `HTTP ${r.status}`, data: j.data,
+    detail: text.slice(0, 300),
+  };
 }
 
 // Flutterwave sends the secret hash you set in the dashboard in the "verif-hash" header.
@@ -349,7 +355,7 @@ export async function billDebug() {
     rows.forEach((x) => Object.keys(x || {}).forEach((k) => fields.add(k)));
     const categoryNames = new Set(rows.map((x) => x.category_name).filter(Boolean));
     out[path] = {
-      ok: Boolean(r.ok), message: r.msg || null, count: rows.length,
+      ok: Boolean(r.ok), message: r.msg || null, detail: r.detail || null, count: rows.length,
       fields: [...fields], categoryNames: [...categoryNames].slice(0, 80), sample: rows.slice(0, 3),
     };
   }
