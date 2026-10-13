@@ -25,6 +25,7 @@ async function viaScript(to, subject, text) {
 
 export async function sendMail(to, subject, text) {
   if (process.env.MAIL_WEBHOOK_URL) return viaScript(to, subject, text);
-  if (!smtp) return console.log(`[mail to ${to}] ${subject}: ${text}`);
+  // Never log the message body: it can hold a sign-in or PIN reset code.
+  if (!smtp) return console.log(`[mail to ${to}] ${subject} (no mail server set, not sent)`);
   await smtp.sendMail({ from: process.env.MAIL_FROM || process.env.SMTP_USER, to, subject, text });
 }

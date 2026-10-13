@@ -103,7 +103,7 @@ export async function payout(p) {
   const reference = `payout-${p.id}`;
   if (!live()) {
     if (!sandbox()) throw new Error('Flutterwave key is missing');
-    console.log(`[sandbox payout] ${reference} amount=${p.amount} to ${p.account_number}/${p.bank_code}`);
+    console.log(`[sandbox payout] ${reference} amount=${p.amount} to ...${String(p.account_number).slice(-4)}/${p.bank_code}`);
     return { status: 'success' };
   }
   const known = await payoutStatus(reference);
@@ -166,7 +166,7 @@ async function finalStatus(status, reference, msg) {
 export async function payBill({ reference, customer, amount, network }) {
   if (!live()) {
     if (!sandbox()) throw new Error('Flutterwave key is missing');
-    console.log(`[sandbox bill] ${reference} ${network} ${amount} to ${customer}`);
+    console.log(`[sandbox bill] ${reference} ${network} ${amount} to ...${String(customer).slice(-4)}`);
     return { status: 'success' };
   }
   const item = await airtimeItemFor(network);
@@ -318,7 +318,7 @@ export async function validateBillCustomer({ billerCode, itemCode, customer }) {
 export async function payBillItem({ reference, category, billerCode, itemCode, customer, amountKobo }) {
   if (!live()) {
     if (!sandbox()) throw new Error('Flutterwave key is missing');
-    console.log(`[sandbox bill] ${reference} ${category} ${billerCode}/${itemCode} ${amountKobo} to ${customer}`);
+    console.log(`[sandbox bill] ${reference} ${category} ${billerCode}/${itemCode} ${amountKobo} to ...${String(customer).slice(-4)}`);
     return { status: 'success' };
   }
   const r = await call('/bills', 'POST', {
