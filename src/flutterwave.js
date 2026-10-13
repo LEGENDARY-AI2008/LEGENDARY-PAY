@@ -166,9 +166,11 @@ async function verifyBill(reference, msg) {
     await new Promise((res) => setTimeout(res, 5000));
     const v = await call(`/transactions/verify_by_reference?tx_ref=${encodeURIComponent(reference)}`);
     const s = String(v.data?.status || '').toLowerCase();
+    console.log(`[verify] ${reference} check=${i + 1} http=${v.http} status=${s || '-'} processor=${v.data?.processor_response || '-'}`);
     if (s === 'successful' || s === 'success') return { status: 'success' };
     if (s === 'failed') return { status: 'failed', msg: v.data?.processor_response || msg };
   }
+  console.log(`[verify] ${reference} still pending after checks`);
   return { status: 'pending', msg };
 }
 
@@ -182,25 +184,18 @@ async function finalStatus(status, reference, msg) {
 export async function payBill({ reference, customer, amount, network }) {
   if (!live()) {
     if (!sandbox()) throw new Error('Flutterwave key is missing');
-    console.log(`[sandbox bill] ${reference} ${network} ${amount} to ...${String(customer).slice(-4)}`);
+    console.log(`[sandbox bill] ${reference} ${network} ${amount} to ${customer}`);
     return { status: 'success' };
   }
-  const item = await airtimeItemFor(network);
-  if (!item) {
-    const rows = await airtimeRows();
-    console.log(`[airtime] ${reference} network=${network} NO ITEM FOUND. airtime rows from Flutterwave=${rows.length}`);
-    return { status: 'failed', msg: `No airtime item found for ${network}` };
-  }
-  // Flutterwave's bill payment: POST /billers/{biller_code}/items/{item_code}/payment (no separate validation for airtime).
-  const r = await call(`/billers/${encodeURIComponent(item.billerCode)}/items/${encodeURIComponent(item.itemCode)}/payment`, 'POST', {
-    country: 'NG', customer_id: String(customer), amount: Number(amount) / 100, reference,
+  // This is the request shape that delivered MTN airtime in production. Do not change it without a live test.
+  const r = await call('/bills', 'POST', {
+    country: 'NG', customer, amount: Number(amount) / 100, type: 'AIRTIME', network, reference,
   });
-  console.log(`[airtime] ${reference} network=${network} item=${item.itemCode} biller=${item.billerCode} http=${r.http} ok=${r.ok} status=${r.data?.status ?? '-'} msg=${r.msg}`);
-  // Server error or no answer: we cannot tell, so check Flutterwave before deciding.
+  console.log(`[airtime] ${reference} network=${network} http=${r.http} ok=${r.ok} status=${r.data?.status ?? '-'} msg=${r.msg}`);
   if (r.http >= 500) return verifyBill(reference, r.msg);
-  // Flutterwave accepted the request (2xx), even if it says "Pending": check the final result, never refund on that.
+  // Accepted (2xx) even when it says Pending: check the final result, never refund on that alone.
   if (r.http >= 200 && r.http < 300) return finalStatus(r.data?.status, reference, r.msg);
-  // Flutterwave refused the request (bad item, wrong key, validation): it was never sent, so refund.
+  // Refused outright: it was never sent, so refund.
   return { status: 'failed', msg: r.msg };
 }
 
@@ -257,20 +252,46 @@ const textOf = (b) => `${b.name || ''} ${b.biller_name || ''} ${b.short_name || 
 let allRowsCache = { v: null, exp: 0 };
 async function allBillRows() {
   if (allRowsCache.v && Date.now() < allRowsCache.exp) return allRowsCache.v;
-  const r = await call('/bill-categories');
+  const r = await callRetry('/bill-categories');
   if (!r.ok) throw new Error(r.msg || 'Could not load providers');
   allRowsCache = { v: r.data || [], exp: Date.now() + 3600 * 1000 };
   return allRowsCache.v;
 }
 
+// Flutterwave sometimes answers 400 or 429 to the list calls for a short time. Retry, then use the last good list.
+async function callRetry(path, tries = 3) {
+  let r;
+  for (let i = 0; i < tries; i++) {
+    r = await call(path);
+    if (r.ok) return r;
+    if (r.http !== 400 && r.http !== 429 && r.http < 500) return r;
+    await new Promise((res) => setTimeout(res, 1500 * (i + 1)));
+  }
+  return r;
+}
+
+const billerCache = new Map();  // category -> { v, exp }
 export async function listBillers(category) {
   if (!live()) {
     if (!sandbox()) throw new Error('Flutterwave key is missing');
     return SANDBOX_BILLERS[category] || [];
   }
+  const hit = billerCache.get(category);
+  if (hit && Date.now() < hit.exp) return hit.v;
+  try {
+    const v = await listBillersFresh(category);
+    billerCache.set(category, { v, exp: Date.now() + 6 * 3600 * 1000 });
+    return v;
+  } catch (e) {
+    if (hit) return hit.v;   // Flutterwave is failing: show the last good list, even if it is old
+    throw e;
+  }
+}
+
+async function listBillersFresh(category) {
   let rows;
   if (CATEGORY_FLAG[category]) {
-    const r = await call(`/bill-categories?${CATEGORY_FLAG[category]}=1`);
+    const r = await callRetry(`/bill-categories?${CATEGORY_FLAG[category]}=1`);
     if (!r.ok) throw new Error(r.msg || 'Could not load providers');
     rows = r.data || [];
   } else if (KEYWORDS[category]) {
