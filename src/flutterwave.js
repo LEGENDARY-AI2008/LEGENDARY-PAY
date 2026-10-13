@@ -117,23 +117,67 @@ export async function payout(p) {
 }
 
 // Airtime top-up through Flutterwave Bills.
-// NOT YET VERIFIED against the live API: the first real call will show whether these fields are right.
+// Flutterwave needs the network's own airtime item (found in its airtime list), not the network name.
+// Only a confirmed "successful" counts as success. Anything unclear is looked up before we decide.
 // Returns 'success' | 'pending' | 'failed'. Only 'failed' triggers an automatic refund.
+const AIRTIME_WORDS = { MTN: /\bMTN\b/i, GLO: /\bGLO\b/i, AIRTEL: /AIRTEL/i, '9MOBILE': /9\s?MOBILE|ETISALAT/i };
+
+let airtimeCache = { v: null, exp: 0 };
+async function airtimeRows() {
+  if (airtimeCache.v && Date.now() < airtimeCache.exp) return airtimeCache.v;
+  let r = await call('/bill-categories?airtime=1');
+  let rows = r.ok && Array.isArray(r.data) ? r.data : [];
+  if (!rows.length) {
+    // Fallback: the flag-less list, keeping only the rows Flutterwave marks as airtime.
+    const all = await call('/bill-categories');
+    rows = (all.ok && Array.isArray(all.data) ? all.data : []).filter((x) => Number(x.is_airtime) === 1);
+  }
+  airtimeCache = { v: rows, exp: Date.now() + 3600 * 1000 };
+  return rows;
+}
+
+async function airtimeItemFor(network) {
+  const re = AIRTIME_WORDS[network];
+  if (!re) return null;
+  const rows = (await airtimeRows()).filter((x) => re.test(`${x.name || ''} ${x.biller_name || ''} ${x.short_name || ''}`));
+  const row = rows.find((x) => Number(x.is_airtime) === 1) || rows[0];
+  return row ? { billerCode: row.biller_code, itemCode: row.item_code } : null;
+}
+
+// Asks Flutterwave for the final result of one reference (a few short checks).
+async function verifyBill(reference, msg) {
+  for (let i = 0; i < 2; i++) {
+    await new Promise((res) => setTimeout(res, 5000));
+    const v = await call(`/transactions/verify_by_reference?tx_ref=${encodeURIComponent(reference)}`);
+    const s = String(v.data?.status || '').toLowerCase();
+    if (s === 'successful' || s === 'success') return { status: 'success' };
+    if (s === 'failed') return { status: 'failed', msg: v.data?.processor_response || msg };
+  }
+  return { status: 'pending', msg };
+}
+
+async function finalStatus(status, reference, msg) {
+  const s = String(status || '').toLowerCase();
+  if (s === 'successful' || s === 'success') return { status: 'success' };
+  if (s === 'failed') return { status: 'failed', msg };
+  return verifyBill(reference, msg);
+}
+
 export async function payBill({ reference, customer, amount, network }) {
   if (!live()) {
     if (!sandbox()) throw new Error('Flutterwave key is missing');
     console.log(`[sandbox bill] ${reference} ${network} ${amount} to ${customer}`);
     return { status: 'success' };
   }
+  const item = await airtimeItemFor(network);
+  if (!item) return { status: 'failed', msg: `No airtime item found for ${network}` };
   const r = await call('/bills', 'POST', {
-    country: 'NG', customer, amount: Number(amount) / 100, type: 'AIRTIME', network, reference,
+    country: 'NG', customer, amount: Number(amount) / 100, recurrence: 'ONCE',
+    type: item.itemCode, biller_name: item.billerCode, reference,
   });
-  if (r.http >= 500 || !r.data && !r.ok) return { status: 'pending', msg: r.msg };
+  if (r.http >= 500 || (!r.data && !r.ok)) return verifyBill(reference, r.msg);
   if (!r.ok) return { status: 'failed', msg: r.msg };
-  const s = String(r.data?.status || '').toLowerCase();
-  if (s === 'successful' || s === 'success') return { status: 'success' };
-  if (s === 'failed') return { status: 'failed', msg: r.msg };
-  return { status: 'pending', msg: r.msg };
+  return finalStatus(r.data?.status, reference, r.msg);
 }
 
 // ---------- data, electricity, cable and other bills ----------
