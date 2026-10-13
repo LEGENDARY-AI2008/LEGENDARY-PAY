@@ -2,6 +2,7 @@
 // budgets and insights, scheduled transfers and savings, leaderboard, recent contacts, limits.
 // Mounted from server.js with the helpers it needs, so this file stays independent of server state.
 import { post } from './ledger.js';
+import { decryptField } from './secure.js';
 
 const BUDGET_CATEGORIES = ['internal_transfer', 'bank_transfer', 'bill_airtime', 'goal_deposit'];
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -277,11 +278,21 @@ export function mountFeatures(app, d) {
          FROM journal j JOIN users u ON u.id = (j.meta->>'to')::uuid
          WHERE j.user_id=$1 AND j.kind='internal_transfer'
          ORDER BY u.id, j.created_at DESC) x ORDER BY created_at DESC LIMIT 5`, [req.uid])).rows;
-    const banks = (await q(
-      `SELECT * FROM (SELECT DISTINCT ON (j.meta->>'accountNumber') j.meta->>'accountNumber' AS account_number,
-           j.meta->>'bankCode' AS bank_code, j.created_at
-         FROM journal j WHERE j.user_id=$1 AND j.kind='bank_transfer'
-         ORDER BY j.meta->>'accountNumber', j.created_at DESC) x ORDER BY created_at DESC LIMIT 5`, [req.uid])).rows;
+    // Account numbers are encrypted, so duplicates are removed here after decrypting.
+    const bankRows = (await q(
+      `SELECT j.meta->>'accountNumber' AS account_number, j.meta->>'bankCode' AS bank_code, j.created_at
+         FROM journal j WHERE j.user_id=$1 AND j.kind='bank_transfer' AND j.meta ? 'accountNumber'
+         ORDER BY j.created_at DESC LIMIT 50`, [req.uid])).rows;
+    const seenBanks = new Set();
+    const banks = [];
+    for (const b of bankRows) {
+      const acct = decryptField(b.account_number);
+      const key = `${acct}|${b.bank_code}`;
+      if (!acct || seenBanks.has(key)) continue;
+      seenBanks.add(key);
+      banks.push({ account_number: acct, bank_code: b.bank_code });
+      if (banks.length === 5) break;
+    }
     res.json({
       wallets: wallets.map((w) => ({ name: maskName(w.full_name), accountNumber: w.account_number })),
       banks: banks.map((b) => ({ accountNumber: b.account_number, bankCode: b.bank_code })),

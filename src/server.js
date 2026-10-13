@@ -23,11 +23,13 @@ import { mountAccount } from './account.js';
 import { mountStaff } from './staff.js';
 import { pushUsers, pushToStaff, mountPush } from './push.js';
 import { mountAI } from './ai.js';
+import { encryptField, decryptField, fingerprint, checkBankKey } from './secure.js';
 
 const sandbox = process.env.SANDBOX === '1';
-const required = ['DATABASE_URL', 'JWT_SECRET',
+const required = ['DATABASE_URL', 'JWT_SECRET', 'BANK_KEY',
   ...(sandbox ? [] : ['FLW_SECRET_KEY', 'FLW_WEBHOOK_HASH'])];
 for (const k of required) if (!process.env[k]) { console.error(`Missing env ${k}`); process.exit(1); }
+try { checkBankKey(); } catch (e) { console.error(e.message); process.exit(1); }
 // Live Flutterwave keys start with FLWSECK- (test keys start with FLWSECK_TEST-). Never allow sandbox mode with live keys.
 if (sandbox && /^FLWSECK-/.test(process.env.FLW_SECRET_KEY || '')) {
   console.error('SANDBOX=1 must never be used with a live Flutterwave key'); process.exit(1);
@@ -310,7 +312,7 @@ app.get('/wallet/receipt/:id', auth, h(async (req, res) => {
     at: j.created_at,
     reference: j.meta?.reference || null,
     note: j.meta?.note || null,
-    bankAccount: payout ? payout.account_number : null,
+    bankAccount: payout ? decryptField(payout.account_number) : null,
     feeKobo: payout ? Number(payout.fee) : 0,
     status: payout ? payout.status : 'success',
   });
@@ -402,7 +404,7 @@ app.post('/transfer/bank', auth, h(async (req, res) => {
   const idem = `bt:${req.uid}:${idemKey}`;
   const r = await tx(async (c) => {
     const r = await post(c, {
-      idem, kind: 'bank_transfer', userId: req.uid, meta: { amount, bankCode, accountNumber, note: bankNote || undefined },
+      idem, kind: 'bank_transfer', userId: req.uid, meta: { amount, bankCode, accountNumber: encryptField(accountNumber), note: bankNote || undefined },
       legs: [
         { account: `u:${req.uid}:main`, amount: -(amount + fee) },
         { account: 'sys:external', amount: amount + pf },
@@ -414,7 +416,7 @@ app.post('/transfer/bank', auth, h(async (req, res) => {
     const p = (await c.query(
       `INSERT INTO payouts(idem, user_id, amount, fee, partner_fee, pool_part, rev_part, bank_code, account_number)
        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
-      [idem, req.uid, amount, fee, pf, poolPart, rev, bankCode, accountNumber])).rows[0];
+      [idem, req.uid, amount, fee, pf, poolPart, rev, bankCode, encryptField(accountNumber)])).rows[0];
     await enqueue(c, 'payout', { payoutId: p.id });
     await queueGrant(c, req.uid, 'cashback', idem, Math.floor((fee * s.cashback_of_fee_bps) / 10000));
     await enqueue(c, 'evaluate_bonuses', { userId: req.uid });
@@ -565,14 +567,17 @@ app.post('/goals/:id/move', auth, h(async (req, res) => {
 async function saveBeneficiary(uid, { type, label, accountNumber, bankCode = '' }) {
   const name = String(label || '').trim().slice(0, 40);
   if (!name) return;
+  const acct = String(accountNumber || '');
   await q(
-    `INSERT INTO beneficiaries(user_id, type, label, account_number, bank_code) VALUES($1,$2,$3,$4,$5)
-     ON CONFLICT DO NOTHING`, [uid, type, name, accountNumber, bankCode]);
+    `INSERT INTO beneficiaries(user_id, type, label, account_number, account_hash, bank_code)
+     SELECT $1::uuid, $2::text, $3::text, $4::text, $5::text, $6::text
+     WHERE NOT EXISTS (SELECT 1 FROM beneficiaries WHERE user_id=$1::uuid AND type=$2::text AND account_hash=$5::text AND bank_code=$6::text)`,
+    [uid, type, name, encryptField(acct), fingerprint(acct), bankCode]);
 }
 
 app.get('/beneficiaries', auth, h(async (req, res) => {
   const r = await q('SELECT id, type, label, account_number, bank_code FROM beneficiaries WHERE user_id=$1 ORDER BY label', [req.uid]);
-  res.json(r.rows.map((b) => ({ id: b.id, type: b.type, label: b.label, accountNumber: b.account_number, bankCode: b.bank_code })));
+  res.json(r.rows.map((b) => ({ id: b.id, type: b.type, label: b.label, accountNumber: decryptField(b.account_number), bankCode: b.bank_code })));
 }));
 
 app.delete('/beneficiaries/:id', auth, h(async (req, res) => {

@@ -1,6 +1,8 @@
 // Delete my account, and export my data (NDPA right of access and deletion).
 // Personal details and saved items are wiped and sign-in is blocked. Money records stay
 // (the ledger must stay complete for audits and disputes). Only allowed when the wallet is empty.
+import { decryptField } from './secure.js';
+
 export function mountAccount(app, d) {
   const { auth, h, q, tx, httpErr, checkPin } = d;
 
@@ -23,8 +25,8 @@ export function mountAccount(app, d) {
     res.json({
       exportedAt: new Date().toISOString(),
       profile: profile.rows[0] || null,
-      savedBeneficiaries: beneficiaries.rows,
-      payouts: payouts.rows,
+      savedBeneficiaries: beneficiaries.rows.map((b) => ({ ...b, account_number: decryptField(b.account_number) })),
+      payouts: payouts.rows.map((p) => ({ ...p, account_number: decryptField(p.account_number) })),
       billPayments: bills.rows,
       transactions: ledger.rows,
       supportMessages: support.rows,
@@ -48,6 +50,9 @@ export function mountAccount(app, d) {
         await c.query(`DELETE FROM ${t} WHERE user_id = $1`, [req.uid]);
       }
       await c.query(`UPDATE bill_payments SET phone = 'deleted' WHERE user_id = $1`, [req.uid]);
+      // Bank account numbers go. The amounts and dates stay in the ledger.
+      await c.query(`UPDATE payouts SET account_number = 'deleted' WHERE user_id = $1`, [req.uid]);
+      await c.query(`UPDATE journal SET meta = meta - 'accountNumber' WHERE user_id = $1 AND kind = 'bank_transfer'`, [req.uid]);
       await c.query(
         `UPDATE users SET phone = $2, email = NULL, full_name = NULL, pin_hash = '!deleted', pin_fails = 0, locked_until = NULL,
            device_id = NULL, account_number = NULL, virtual_account = NULL, virtual_bank = NULL, deleted_at = now()

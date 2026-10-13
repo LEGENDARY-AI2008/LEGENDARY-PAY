@@ -184,7 +184,7 @@ async function finalStatus(status, reference, msg) {
 export async function payBill({ reference, customer, amount, network }) {
   if (!live()) {
     if (!sandbox()) throw new Error('Flutterwave key is missing');
-    console.log(`[sandbox bill] ${reference} ${network} ${amount} to ${customer}`);
+    console.log(`[sandbox bill] ${reference} ${network} ${amount} to ...${String(customer).slice(-4)}`);
     return { status: 'success' };
   }
   // This is the request shape that delivered MTN airtime in production. Do not change it without a live test.

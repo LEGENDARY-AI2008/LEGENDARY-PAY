@@ -9,6 +9,7 @@ import { settlePayout } from './payouts.js';
 import { alert } from './alert.js';
 import { sendMail } from './mail.js';
 import { pushAll } from './push.js';
+import { decryptField } from './secure.js';
 
 const ref = (id) => `payout-${id}`;
 
@@ -22,7 +23,7 @@ startWorker({
     run: async ({ payoutId }) => {
       const p = (await q('SELECT * FROM payouts WHERE id=$1', [payoutId])).rows[0];
       if (!p || p.status !== 'queued') return;
-      const r = await payout(p);
+      const r = await payout({ ...p, account_number: decryptField(p.account_number) });
       if (r.status === 'success') await settlePayout(p.id, 'success');
       else if (r.status === 'failed') await settlePayout(p.id, 'failed');
       else await q(`UPDATE payouts SET status='processing' WHERE id=$1 AND status='queued'`, [p.id]);

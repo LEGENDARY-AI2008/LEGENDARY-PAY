@@ -312,3 +312,7 @@ CREATE INDEX IF NOT EXISTS bill_schedules_due ON bill_schedules(active, next_run
 
 -- bill cashback: share of the bill amount paid back to the user (200 = 2%, i.e. N2 per N100)
 INSERT INTO settings(key, value) VALUES ('bill_cashback_bps', 200) ON CONFLICT (key) DO NOTHING;
+
+-- keyed fingerprint of saved account numbers (duplicate checks without storing the number in clear)
+ALTER TABLE beneficiaries ADD COLUMN IF NOT EXISTS account_hash text;
+CREATE INDEX IF NOT EXISTS beneficiaries_hash ON beneficiaries(user_id, type, account_hash, bank_code);

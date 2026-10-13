@@ -3,6 +3,7 @@
 // Every action is posted through the ledger with a reason, and written to staff_audit.
 import crypto from 'node:crypto';
 import { post, INSUFFICIENT } from './ledger.js';
+import { decryptField } from './secure.js';
 
 // Limits for support staff, in kobo. Admins are not limited, but every action is still logged.
 const ADJUST_MAX = Number(process.env.STAFF_ADJUST_MAX_KOBO || 2000000);  // ₦20,000 per action
@@ -101,6 +102,25 @@ export function mountStaff(app, d) {
   }));
 
   // Clears a locked PIN after support has checked who the person is. Needs the staff member's own PIN or fingerprint.
+  // Full bank account number of one payout. Admin only (not support staff), PIN needed, every view is logged.
+  app.post('/staff/bank-details', staffOnly, h(async (req, res) => {
+    if (!req.staff.admin) throw httpErr(403, 'Admins only');
+    const { payoutId, reason, pin, approval } = req.body || {};
+    const why = String(reason || '').trim();
+    if (!/^\d+$/.test(String(payoutId || ''))) throw httpErr(400, 'Enter the payout number');
+    if (why.length < 5) throw httpErr(400, 'Write the reason (at least 5 letters)');
+    await checkPin(req.uid, pin, approval);
+    const p = (await q('SELECT id, user_id, bank_code, account_number, amount, status, created_at FROM payouts WHERE id=$1', [payoutId])).rows[0];
+    if (!p) throw httpErr(404, 'Payout not found');
+    await q(
+      `INSERT INTO staff_audit(staff_id, action, target_user_id, amount_kobo, reason, ref) VALUES($1,'view_bank',$2,0,$3,$4)`,
+      [req.staff.id, p.user_id, why, String(p.id)]);
+    res.json({
+      payoutId: p.id, bankCode: p.bank_code, accountNumber: decryptField(p.account_number),
+      amountKobo: Number(p.amount), status: p.status, at: p.created_at,
+    });
+  }));
+
   app.post('/staff/unlock-pin', staffOnly, h(async (req, res) => {
     const { userId, reason, pin, approval } = req.body || {};
     const why = String(reason || '').trim();
