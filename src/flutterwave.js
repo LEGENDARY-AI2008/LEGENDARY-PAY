@@ -142,12 +142,22 @@ async function airtimeRows() {
   return rows;
 }
 
-async function airtimeItemFor(network) {
+// Other countries' networks (Ghana, Uganda, Zambia, ...) must never be picked for a Nigerian number.
+const FOREIGN_AIRTIME = /GHANA|UGANDA|\bUG\b|\bZM\b|ZAMBIA|SAFARICOM|TIGO|VODAFONE|AFRICELL|TELKOM|T-MOBILE|ZAMTEL/i;
+
+// Picks the Nigerian airtime item for a network: the row marked as airtime, with "VTU" in its name first.
+export function pickAirtime(rows, network) {
   const re = AIRTIME_WORDS[network];
   if (!re) return null;
-  const rows = (await airtimeRows()).filter((x) => re.test(`${x.name || ''} ${x.biller_name || ''} ${x.short_name || ''}`));
-  const row = rows.find((x) => Number(x.is_airtime) === 1) || rows[0];
-  return row ? { billerCode: row.biller_code, itemCode: row.item_code } : null;
+  const text = (x) => `${x.name || ''} ${x.biller_name || ''} ${x.short_name || ''}`;
+  const cands = rows.filter((x) => (x.country ? x.country === 'NG' : true) && !FOREIGN_AIRTIME.test(text(x)) && re.test(text(x)));
+  const row = cands.find((x) => Number(x.is_airtime) === 1 && /VTU/i.test(x.name || ''))
+    || cands.find((x) => Number(x.is_airtime) === 1) || null;
+  return row ? { billerCode: row.biller_code, itemCode: row.item_code, name: row.name } : null;
+}
+
+async function airtimeItemFor(network) {
+  return pickAirtime(await airtimeRows(), network);
 }
 
 // Asks Flutterwave for the final result of one reference (a few short checks).
@@ -365,9 +375,7 @@ export async function billDebug() {
     is_airtime: x.is_airtime, amount: x.amount,
   }));
   out.airtimeUsed = air.slice(0, 60);
-  out.airtimePicked = Object.fromEntries(Object.keys(AIRTIME_WORDS).map((n) => {
-    const hit = air.find((x) => AIRTIME_WORDS[n].test(`${x.name || ''} ${x.biller_name || ''}`));
-    return [n, hit ? { biller_code: hit.biller_code, item_code: hit.item_code } : null];
-  }));
+  const raw = await airtimeRows();
+  out.airtimePicked = Object.fromEntries(Object.keys(AIRTIME_WORDS).map((n) => [n, pickAirtime(raw, n)]));
   return out;
 }
