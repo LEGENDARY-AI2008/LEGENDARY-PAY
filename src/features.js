@@ -130,7 +130,7 @@ export function mountFeatures(app, d) {
       await c.query('INSERT INTO checkins(user_id, day, streak) VALUES($1,$2,$3)', [req.uid, today, streak]);
       await post(c, {
         idem: `checkin:${req.uid}:${today}`, kind: 'bonus', userId: req.uid, meta: { type: 'check-in', streak },
-        legs: [{ account: 'sys:pool', amount: -bonus }, { account: `u:${req.uid}:bonus`, amount: bonus }],
+        legs: [{ account: 'sys:pool', amount: -bonus }, { account: `u:${req.uid}:main`, amount: bonus }],
       });
     });
     res.json({ streak, bonusKobo: bonus });
